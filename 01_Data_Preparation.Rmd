@@ -1,0 +1,780 @@
+---
+title: "01 Data Preparation"
+author: "Alina Apel"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: show
+    number_sections: true
+    theme: default
+---
+
+# Overview
+
+This script prepares the VERA-3 short-answer data for the final project. It performs four main steps:
+
+1. Import the raw data.
+2. Exclude non-answers.
+3. Apply spelling normalization to the student responses.
+4. Read the second human rating.
+5. Generate transformer-based sentence embeddings.
+
+The spelling normalization is designed to correct obvious typos from primary-school student responses without changing the substantive meaning of the answer. The original response is always kept in the data set.
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+# General chunk options
+knitr::opts_chunk$set(
+  message = FALSE,
+  warning = FALSE
+)
+
+# Required packages
+library(readxl)
+library(writexl)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(text)
+library(reticulate)
+library(mlr3)
+
+# File paths
+raw_data_path      <- file.path("data", "N16H13510a.xlsx")
+clean_data_path    <- file.path("data", "N16H13510a_cleaned.xlsx")
+review_table_path  <- file.path("data", "changed_responses_review.xlsx")
+rated_data_path    <- file.path("data", "N16H13510a_cleaned_rated.xlsx")
+embeddings_path    <- file.path("data", "data_with_embeddings.rds")
+
+# Reproducibility
+set.seed(2026)
+```
+
+# Data Import and Basic Cleaning
+
+```{r read-raw-data}
+dat_raw <- read_excel(raw_data_path)
+
+# Inspect the original score distribution.
+# In this data set:
+# 0 = incorrect answer
+# 1 = correct answer
+# 9 = no answer / not usable for the scoring task
+table(dat_raw$Score, useNA = "ifany")
+```
+
+Keep only valid human-scored answers:
+
+```{r clean-scores}
+dat_clean <- dat_raw %>%
+  filter(Score %in% c(0, 1)) %>%
+  mutate(
+    # Stable ID for tracing responses across preprocessing steps
+    response_id = row_number(),
+
+    # Preserve the original answer exactly as it appears in the raw data
+    Transkription_raw = Transkription,
+
+    # Lowercase version used as input for spelling normalization
+    Transkription_lowercase = str_to_lower(Transkription_raw, locale = "de")
+  )
+
+# Check the score distribution after excluding non-answers.
+table(dat_clean$Score, useNA = "ifany")
+```
+
+# Spelling Normalization
+
+## LLM Prompt
+
+The responses were written by primary-school students and therefore contain spelling mistakes, typos, inconsistent spacing, and missing capitalization. The goal of this preprocessing step is to normalize obvious spelling errors while preserving the student's intended meaning.
+
+The data frame `dat_clean` was given to an LLM (ChatGPT 5.5) with the following prompt to generate the recoding rules:
+
+```{text}
+You are helping me prepare primary-school student responses for a scientific text-analysis project.
+
+The dataset contains short German student answers to an open VERA-3 task. The answers include many spelling mistakes, typos, missing capitalization, and child-like writing. Your task is not to score the answers and not to improve their content. Your task is only to help me define cautious preprocessing / recoding rules for spelling normalization.
+
+Please inspect the uploaded responses and propose general recoding rules that correct obvious spelling mistakes while preserving the student’s intended meaning.
+```
+
+## Helper Functions
+
+```{r helper-functions}
+# Create Unicode-aware word boundaries.
+# This helps avoid replacements inside longer words.
+word_boundary <- function(pattern) {
+  paste0("(?<!\\p{L})(?:", pattern, ")(?!\\p{L})")
+}
+
+# Case-insensitive string replacement.
+replace_ci <- function(text, pattern, replacement) {
+  stringr::str_replace_all(
+    text,
+    stringr::regex(pattern, ignore_case = TRUE),
+    replacement
+  )
+}
+
+# Apply a named vector of replacement rules sequentially.
+# names(rules)  = regular expression pattern
+# values(rules) = replacement
+apply_rule_set <- function(text, rules, use_word_boundaries = TRUE) {
+  for (pattern in names(rules)) {
+    final_pattern <- if (use_word_boundaries) {
+      word_boundary(pattern)
+    } else {
+      pattern
+    }
+
+    text <- replace_ci(text, final_pattern, rules[[pattern]])
+  }
+
+  text
+}
+
+# Basic spacing and punctuation cleanup.
+# For transformer embeddings, punctuation is kept by default because
+# sentence-transformer models are trained on natural text.
+normalize_spacing <- function(text, remove_punctuation = FALSE) {
+  text <- stringr::str_replace_all(text, "\u00A0", " ")
+  text <- stringr::str_replace_all(text, "\\s+", " ")
+  text <- stringr::str_squish(text)
+
+  # Remove spaces before punctuation.
+  text <- stringr::str_replace_all(text, "\\s+([,.!?;:])", "\\1")
+
+  # Collapse repeated commas.
+  text <- stringr::str_replace_all(text, ",{2,}", ",")
+
+  # Add a space after punctuation if punctuation is directly followed by a letter.
+  text <- stringr::str_replace_all(text, "([,.!?;:])(?=\\p{L})", "\\1 ")
+
+  # Optional punctuation removal.
+  # This is not used by default for transformer embeddings.
+  if (remove_punctuation) {
+    text <- stringr::str_replace_all(text, "[\\.,!?]", "")
+  }
+
+  text <- stringr::str_replace_all(text, "\\s+", " ")
+  text <- stringr::str_squish(text)
+
+  text
+}
+```
+
+## Rule Sets
+
+```{r spelling-rules}
+# ------------------------------------------------------------
+# Merged tokens
+# ------------------------------------------------------------
+
+split_rules <- c(
+  "jaweiles"       = "ja weil es",
+  "jaweil"         = "ja weil",
+  "nichtgeklaut"   = "nicht geklaut",
+  "geklautist"     = "geklaut ist",
+  "geklautwurden"  = "geklaut wurden",
+  "gestolenwurde"  = "gestohlen wurde",
+  "gewesenist"     = "gewesen ist",
+  "wegsind"        = "weg sind",
+  "suchenund"      = "suchen und",
+  "vermistwerden"  = "vermisst werden",
+  "nichtweil"      = "nicht weil",
+  "nichweil"       = "nicht weil",
+  "gehtso"         = "geht so",
+  "neinsiekönnen"  = "nein, sie können",
+  "wirktalles"     = "wirkt alles",
+  "jasein"         = "ja sein"
+)
+
+# ------------------------------------------------------------
+# Spacing corrections
+# ------------------------------------------------------------
+
+spacing_rules <- c(
+  "kein\\s+en\\s+(dieb|handydieb)" = "keinen \\1",
+  "ge\\s+klaut"                    = "geklaut",
+  "gegen\\s+einander"              = "gegeneinander",
+  "ob\\s+wol"                      = "obwohl",
+  "vor\\s+kommt"                   = "vorkommt",
+  "da\\s+zu"                       = "dazu",
+  "an\\s+gehört"                   = "angehört",
+  "war\\s+scheinlich"              = "wahrscheinlich",
+  "sin\\s+macht"                   = "sinn macht",
+  "örgen\\s+wo"                    = "irgendwo",
+  "handy\\s+dieb"                  = "handydieb",
+  "ein\\s+bruch"                   = "einbruch",
+  "das\\s+heiß"                    = "das heißt",
+  "er\\s+hab"                      = "er hat"
+)
+
+# ------------------------------------------------------------
+# General spelling corrections
+# ------------------------------------------------------------
+
+general_rules <- c(
+  "weiel|weill|waiel|wail|wall|wal|wei|wel|wil|wiel|veil" = "weil",
+  "weiler"      = "weil er",
+  "weils"       = "weil es",
+  "weit"        = "weil",
+  "nich"        = "nicht",
+  "garnicht|ganicht" = "gar nicht",
+  "garkein|gakein"   = "gar kein",
+  "nigts"       = "nichts",
+  "eigendlich|eingentlich|eigelich|eigetlich" = "eigentlich",
+  "irgentwie|irgendwi" = "irgendwie",
+  "vileicht|vilteicht|fileicht|vieleicht|vieleich" = "vielleicht",
+  "nimmant|nimmand|nimand|nimat|niemant|jeman|jemad" = "niemand",
+  "nimanden|nimandern" = "niemanden",
+  "nimlich"     = "nämlich",
+  "naturlich"   = "natürlich",
+  "bischen"     = "bisschen",
+  "gans"        = "ganz",
+  "allso"       = "also",
+  "wüklich|würglich" = "wirklich",
+  "imer"        = "immer",
+  "wider"       = "wieder",
+  "sonden"      = "sondern",
+  "fon"         = "von",
+  "siene"       = "seine",
+  "sain"        = "sein",
+  "ire"         = "ihre",
+  "weiss"       = "weiß",
+  "keienr"      = "keiner",
+  "keir"        = "kein",
+  "anderre|ander" = "andere",
+  "bedoidet"    = "bedeutet",
+  "beser"       = "besser",
+  "dacht"       = "dachte",
+  "dan"         = "dann",
+  "drinn"       = "drin",
+  "eis"         = "es",
+  "vm"          = "vom",
+  "at"          = "hat",
+  "wa"          = "war",
+  "hate"        = "hatte",
+  "hatt"        = "hat",
+  "wehre|were"  = "wäre",
+  "jeweilz"     = "jeweils",
+  "anmeisten"   = "am meisten"
+)
+
+# ------------------------------------------------------------
+# Task vocabulary: Handy / Dieb
+# ------------------------------------------------------------
+
+handy_rules <- c(
+  "handydiebstal" = "handydiebstahl",
+  "handy\\s*[- ]\\s*diebe|handydiebe|händydiebe|handidiebe" = "handydiebe",
+  "handy\\s*[- ]\\s*dieb|handydieb|handydib|handydibe|handydeib|handidib|hendydieb|handesdieb|hamedief" = "handydieb",
+  "handybiedes"   = "handydiebes",
+  "handyferdacht" = "handyverdacht",
+  "händys|hendys|hanys|handis|hendis|händis|hanndis" = "handys",
+  "händy|händi|hendy|hendie|henndie|hendi|hany|handi|henti|hend" = "handy",
+  "ddieb|died|dib" = "dieb",
+  "diebstähe"     = "diebstähle"
+)
+
+# ------------------------------------------------------------
+# Verbs and participles
+# ------------------------------------------------------------
+
+verb_rules <- c(
+  "gecklaut|geklaud|gekalut|geglaut|gklaut|keklaut|gekleit" = "geklaut",
+  "klaud"       = "klaut",
+  "klaun"       = "klauen",
+  "glauen"      = "klauen",
+  "klaube"      = "glaube",
+  "gestolenes"  = "gestohlenes",
+  "gestollene"  = "gestohlene",
+  "gesolenen"   = "gestohlenen",
+  "gestolen|gestollen|gestoln|gestolhen|gestholen|gestahlen|gestöhlen|gechtoln|gschtolen|gstohlen|geschtolen|geschtollen|geschlolen|gestoten|gestohl|gestoll|stohlen" = "gestohlen",
+  "bestolent"   = "bestohlen",
+  "fermist|vermist|fermiest|femist" = "vermisst",
+  "fermiss|fermis" = "vermissen",
+  "fermissen|vermisen" = "vermissen",
+  "vermisten"   = "vermissten",
+  "ferloren"    = "verloren",
+  "ferlohrene|ferlorende" = "verlorene",
+  "walegt|wehgelegt" = "weggelegt",
+  "gevunden"    = "gefunden",
+  "vinde"       = "finde",
+  "winden"      = "finden",
+  "windet"      = "findet",
+  "entdekt"     = "entdeckt",
+  "felte"       = "fehlte",
+  "fet|velt"    = "fehlt",
+  "felen"       = "fehlen",
+  "gekome"      = "gekommen",
+  "kukte"       = "guckte",
+  "ligen"       = "liegen",
+  "solte"       = "sollte",
+  "pecklauen"   = "beklauen",
+  "erkent"      = "erkennt",
+  "dregt"       = "trägt",
+  "verwunden"   = "verschwunden",
+  "geschdden"   = "gestohlen",
+  "fadächtigen" = "verdächtigen"
+)
+
+# ------------------------------------------------------------
+# Passen / passt
+# ------------------------------------------------------------
+
+passt_rules <- c(
+  "passter"          = "passt er",
+  "past|pahst|bast|pass" = "passt",
+  "pasen|bassen"    = "passen",
+  "pasend"           = "passend",
+  "gepast|gepassst"  = "gepasst",
+  "enpasst"          = "passt"
+)
+
+# ------------------------------------------------------------
+# Suspicion / accusation vocabulary
+# ------------------------------------------------------------
+
+suspicion_rules <- c(
+  "ferdechtigen|ferdechigen|verdechtigen|verdechtigt" = "verdächtigen",
+  "ferdechtek|verdachtigt|verdechticht" = "verdächtigt",
+  "ferdechtig|verdechtig|verdachtig|dechtig" = "verdächtig",
+  "ferdacht"     = "verdacht",
+  "dengken|dencken|denge|dencke" = "denken",
+  "häte"         = "hätte",
+  "bescholdikt"  = "beschuldigt",
+  "deschuldigen" = "beschuldigen",
+  "schult"       = "schuld",
+  "gegenseitich|gegen seitig" = "gegenseitig"
+)
+
+# ------------------------------------------------------------
+# Story/task vocabulary and common nouns
+# ------------------------------------------------------------
+
+story_rules <- c(
+  "gechichte|gechite|geschcihte|geschte|gesichte" = "geschichte",
+  "tidel|tiell|tietel" = "titel",
+  "techst"      = "text",
+  "überschrif"  = "überschrift",
+  "über\\s+schrift" = "überschrift",
+  "unterschrift" = "überschrift",
+  "zumbeischbil|zumbeischriel" = "zum beispiel",
+  "vorkomt|workomt" = "vorkommt",
+  "get|gedt"    = "geht",
+  "giebt"       = "gibt",
+  "gabb|gahb"   = "gab",
+  "gehöhrt|göhört" = "gehört",
+  "genomen"     = "genommen",
+  "worde|worder" = "wurde",
+  "würt"        = "wird",
+  "altemann"    = "alte mann",
+  "jungemann"   = "junge mann",
+  "elteremann"  = "ältere mann",
+  "elteren"     = "älteren",
+  "elterere"    = "ältere",
+  "eltereren"   = "älteren",
+  "altere"      = "ältere",
+  "jungere"     = "jüngere",
+  "jungeren"    = "jüngeren",
+  "ausah"       = "aussah",
+  "heisen"      = "heißen",
+  "fasche"      = "falsche",
+  "glinkt"      = "klingt",
+  "interesand"  = "interessant",
+  "jake"        = "jacke",
+  "juchge"      = "junge",
+  "klamoten"    = "klamotten",
+  "kleibung"    = "kleidung",
+  "plotzlich"   = "plötzlich",
+  "setsame|selsame" = "seltsame",
+  "sint"        = "sind",
+  "suger"       = "super",
+  "verwexlung"  = "verwechslung",
+  "wek"         = "weg"
+)
+```
+
+## Apply Spelling Correction
+
+Main spelling correction function:
+
+```{r correction-function}
+correct_spelling <- function(x, remove_punctuation = FALSE) {
+
+  y <- as.character(x)
+  y[is.na(x)] <- NA_character_
+
+  # Initial spacing cleanup.
+  y <- normalize_spacing(y, remove_punctuation = FALSE)
+
+  # Apply rule groups.
+  y <- apply_rule_set(y, split_rules)
+  y <- apply_rule_set(y, spacing_rules)
+  y <- apply_rule_set(y, general_rules)
+  y <- apply_rule_set(y, handy_rules)
+  y <- apply_rule_set(y, verb_rules)
+  y <- apply_rule_set(y, passt_rules)
+  y <- apply_rule_set(y, suspicion_rules)
+  y <- apply_rule_set(y, story_rules)
+
+  # Beginning-of-answer yes/no corrections.
+  # These are kept separate because ja/nein are semantically crucial.
+  y <- replace_ci(y, "^\\s*(jah|jar|jahr|ya|la)\\b", "ja")
+  y <- replace_ci(y, "^\\s*(nia)\\b", "nein")
+
+  # Context-sensitive corrections.
+  # These are applied only when the neighboring words make the intended meaning clearer.
+  y <- replace_ci(y, word_boundary("wurd\\s+passen"), "würde passen")
+  y <- replace_ci(y, word_boundary("wurd\\s+(gestohlen|geklaut)"), "wurde \\1")
+  y <- replace_ci(y, word_boundary("handys\\s+felen"), "handys fehlen")
+  y <- replace_ci(y, word_boundary("handy\\s+felen"), "handy fehlt")
+
+  # Final cleanup.
+  y <- normalize_spacing(y, remove_punctuation = remove_punctuation)
+
+  y
+}
+```
+
+Apply it to the data:
+
+```{r apply-correction}
+dat_clean <- dat_clean %>%
+  mutate(
+    Transkription_corrected = correct_spelling(
+      Transkription_lowercase,
+      remove_punctuation = FALSE
+    ),
+
+    # Optional alternative version without punctuation.
+    # This is not used as the main text for transformer embeddings,
+    # but it may be useful for later robustness checks.
+    Transkription_corrected_no_punct = correct_spelling(
+      Transkription_lowercase,
+      remove_punctuation = TRUE
+    )
+  )
+
+# Review table: all cases where the lowercased version differs from
+# the corrected version.
+changed_responses <- dat_clean %>%
+  filter(
+    !is.na(Transkription_lowercase),
+    Transkription_lowercase != Transkription_corrected
+  ) %>%
+  select(
+    response_id,
+    Score,
+    Transkription_raw,
+    Transkription_lowercase,
+    Transkription_corrected,
+    Transkription_corrected_no_punct
+  )
+
+# Number and proportion of changed responses.
+dat_clean %>%
+  summarise(
+    n_responses = n(),
+    n_changed = sum(Transkription_lowercase != Transkription_corrected, na.rm = TRUE),
+    prop_changed = mean(Transkription_lowercase != Transkription_corrected, na.rm = TRUE)
+  )
+
+# Display changed responses for manual checking.
+changed_responses
+```
+
+Export cleaned data and review table:
+
+```{r export-clean-data}
+write_xlsx(dat_clean, path = clean_data_path)
+write_xlsx(changed_responses, path = review_table_path)
+```
+
+# Second Human Rater
+
+All responses were manually rated a second time by another human rater (me). The second rating is stored in `Score_2`.
+
+```{r read-second-rating}
+dat_rated <- read_excel(rated_data_path)
+
+# Keep only the columns needed for later analyses.
+# The original first rating remains in Score.
+# The second rating is Score_2.
+dat_model <- dat_rated %>%
+  select(
+    Transkription_corrected,
+    Score,
+    Score_2
+  ) %>%
+  mutate(
+    Score = as.numeric(Score),
+    Score_2 = as.numeric(Score_2),
+    rater_agreement = Score == Score_2
+  )
+```
+
+```{r rater-agreement}
+agreement_table <- table(dat_model$rater_agreement, useNA = "ifany")
+
+agreement_summary <- dat_model %>%
+  summarise(
+    n = n(),
+    n_agreement = sum(rater_agreement, na.rm = TRUE),
+    n_disagreement = sum(!rater_agreement, na.rm = TRUE),
+    agreement_rate = mean(rater_agreement, na.rm = TRUE)
+  )
+
+disagreement_cases <- dat_model %>%
+  filter(!rater_agreement)
+
+agreement_table
+```
+In 26 cases, the raters disagreed.
+
+```{r}
+disagreement_cases %>%
+  dplyr::rename(
+    `Corrected response` = Transkription_corrected,
+    `Original rating` = Score,
+    `Second rating` = Score_2
+  ) %>%
+  knitr::kable(
+    caption = "Cases where the two human raters disagreed",
+    align = c("l", "c", "c")
+  )
+```
+
+
+# Generate Embeddings
+
+Each student response was transformed into a numerical embedding vector using the `text` package (Kjell et al., 2023). These embeddings represented the semantic content of the answers, so that responses with similar meanings should be located close to each other in the vector space. For this, the model `T-Systems-onsite/cross-en-de-roberta-sentence-transformer` was used. 
+
+```{r}
+model_name <- "T-Systems-onsite/cross-en-de-roberta-sentence-transformer"
+```
+
+This sentence-transformer model is based on XLM-RoBERTa (Conneau et al., 2020) and was fine-tuned for semantic textual similarity in German and English. In R, the embeddings were generated with the package `text`, which provides access to transformer-based language models, together with `reticulate`, which connects R to the required Python environment.
+
+```{r eval=FALSE}
+install.packages("text")
+
+# Install text required python packages in a conda environment (with defaults).
+text::textrpp_install()
+
+# Initialize the installed conda environment.
+text::textrpp_initialize(save_profile = TRUE)
+
+```
+
+For a given sentence, the text can be passed to the `textEmbed()` function, and the resulting text-level embedding is provided for each dimension:
+
+```{r message = FALSE, warning = FALSE}
+library(text)
+library(reticulate)
+
+vec_test <- textEmbed("Dies ist ein Beispieltext auf Deutsch.", model = model_name)
+vec_test$texts$texts # Text level embeddings
+```
+
+The following function sends one answer to the embedding model and returns only the numerical dimensions (as a numerical vector) of the text-level embedding similar to the example above:
+
+```{r}
+generate_embedding_vector <- function(answer_text, model_name){
+  answer_embedding <- textEmbed(answer_text, model = model_name)
+  answer_embedding <- answer_embedding$texts$texts
+  
+  dim_cols <- grep("^Dim", names(answer_embedding))
+  answer_vector <- as.numeric(answer_embedding[1, dim_cols])
+  
+  return(answer_vector)
+}
+```
+
+The same procedure was then applied for every answer in the data set. Generating embeddings took approximately 60 minutes. Therefore, the following chunk saves the embedded dataset as an `.rds` file. If the file already exists, it is loaded instead of recomputing all embeddings.
+
+```{r generate-or-load-embeddings}
+data_embeddings <- data
+
+if (!file.exists("data\\data_with_embeddings.rds")) {
+  data_embeddings$embedding_vector <- lapply(data_embeddings$Transkription_corrected,
+                                              function(x)
+                                                generate_embedding_vector(x, model_name = model_name))
+  
+  saveRDS(data_embeddings, "data\\data_with_embeddings.rds")
+} else {
+  data_embeddings <- readRDS("data\\data_with_embeddings.rds")
+}
+
+data_embeddings$Score <- as.numeric(data_embeddings$Score)
+```
+
+
+# Final Data Frame
+
+```{r}
+data_embeddings <- readRDS("data\\data_with_embeddings.rds")
+names(data_embeddings) <- c("Transkription", "Score", "Score_2", "embedding_vector")
+dim(data_embeddings)
+```
+
+## for kNN
+
+Needs the embeddings as one vector per answer.
+
+```{r}
+data_knn <- data_embeddings %>%
+  mutate(
+    row_id = row_number(),
+    Score = factor(Score, levels = c(0, 1)),
+    Score_2 = factor(Score_2, levels = c(0, 1))
+  ) %>%
+  select(
+    row_id,
+    Transkription,
+    Score,
+    Score_2,
+    embedding_vector
+  )
+
+dim(data_knn)
+```
+
+
+## for Regression & RF
+
+Needs the embeddings as one variable per dimension.
+
+```{r}
+# Turn the embedding vectors into a matrix
+embedding_matrix <- do.call(rbind, data_embeddings$embedding_vector)
+
+# Turn matrix into a data frame
+embedding_df <- as.data.frame(embedding_matrix)
+
+# Give the dimensions clear names
+names(embedding_df) <- paste0("Dim_", seq_len(ncol(embedding_df)))
+
+# Create final ML data frame
+data_ml <- data_embeddings %>%
+  mutate(
+    row_id = row_number(),
+    Score = factor(Score, levels = c(0, 1)),
+    Score_2 = factor(Score_2, levels = c(0, 1))
+  ) %>%
+  select(
+    row_id,
+    Transkription,
+    Score,
+    Score_2
+  ) %>%
+  bind_cols(embedding_df)
+
+dim(data_ml)
+```
+
+## Compare & Save
+
+Check that both data frames still refer to the same responses:
+
+```{r}
+all(data_knn$row_id == data_ml$row_id)
+all(data_knn$Transkription == data_ml$Transkription)
+all(data_knn$Score == data_ml$Score)
+```
+```{r}
+saveRDS(data_knn, file = "data/data_knn.rds")
+saveRDS(data_ml,  file = "data/data_ml.rds")
+```
+
+# Resampling Structure
+
+The resampling structure is generated once and then reused in all later analysis scripts. The same train-test splits are therefore used for all models.
+
+The resampling structure is based on 25 repetitions of 4-fold cross-validation. This results in 100 train-test splits in total. The folds are stratified by the outcome variable `Score`, so that the proportion of correct and incorrect responses is kept as similar as possible across folds.
+
+```{r}
+# Identify embedding dimension columns
+dim_cols <- grep("^Dim_", names(data_ml), value = TRUE)
+
+# Create mlr3 classification task based on the ML data frame
+# The task is used to define the data set, outcome variable, and row structure
+# for the resampling procedure.
+task_ml <- TaskClassif$new(
+  id = "vera_embeddings",
+  backend = data_ml %>%
+    select(Score, all_of(dim_cols)),
+  target = "Score",
+  positive = "1"
+)
+
+# Use stratification by the outcome variable
+# This keeps the proportion of correct and incorrect responses similar across folds.
+task_ml$col_roles$stratum <- "Score"
+
+# Create 25 repetitions of 4-fold cross-validation
+set.seed(2026)
+
+resampling_25x4 <- rsmp(
+  "repeated_cv",
+  folds = 4,
+  repeats = 25
+)
+
+# Instantiate the resampling structure for the task
+resampling_25x4$instantiate(task_ml)
+
+# Check number of resampling iterations
+resampling_25x4$iters
+
+# Save resampling object and task for later analyses
+saveRDS(
+  resampling_25x4,
+  file = "resampling/resampling_25x4_mlr3.rds"
+)
+
+saveRDS(
+  task_ml,
+  file = "resampling/task_ml.rds"
+)
+```
+
+# Notes for Later Analyses
+
+The object `data_embeddings` is the source data set from which the final analysis data frames were created. It contains the spelling-normalized responses, human ratings, and sentence embeddings.
+
+For the later analysis scripts, two analysis-ready data frames were saved:
+
+- `data_knn`: data frame for the semantic kNN analysis.
+- `data_ml`: data frame for the regression and Random Forest analyses.
+
+The object `data_knn` keeps the sentence embedding as one vector column. It contains:
+
+- `row_id`: unique row identifier used to match observations across data sets.
+- `Transkription`: spelling-normalized response text.
+- `Score`: first human rating / IQB rating.
+- `Score_2`: second human rating.
+- `embedding_vector`: sentence embedding stored as one vector per response.
+
+This data frame is used for the semantic kNN approach, because cosine similarities are computed directly between the embedding vectors.
+
+The object `data_ml` contains the same observations as `data_knn`, but the embedding vector was expanded into separate numeric predictor columns. It contains:
+
+- `row_id`: unique row identifier used to match observations across data sets.
+- `Transkription`: spelling-normalized response text.
+- `Score`: first human rating / IQB rating.
+- `Score_2`: second human rating.
+- `Dim_1`, `Dim_2`, ..., `Dim_n`: individual embedding dimensions.
+
+This data frame is used for regression-based models and Random Forest models, because these models require each predictor to be stored in its own column.
+
+The object `resampling_25x4_mlr3.rds` contains the repeated cross-validation structure. Specifically, 25 repetitions of 4-fold cross-validation were created, resulting in 100 train-test splits. This ensures that all models are evaluated on exactly the same train-test splits.
+
+
+

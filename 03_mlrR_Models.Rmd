@@ -1,0 +1,813 @@
+---
+title: "03 mlr3 Models"
+author: "Alina Apel"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: show
+    number_sections: true
+    theme: default
+---
+
+# Machine Learning Models
+
+This script evaluates machine-learning models based on the sentence-embedding dimensions. The models are compared using the same fixed 25 × 4 repeated cross-validation structure as in the semantic kNN analysis.
+
+The models include a featureless baseline model, Ridge Regression, Elastic Net, Support Vector Machine, an untuned Random Forest, and a tuned Random Forest. Because the outcome variable `Score` is binary, Ridge Regression and Elastic Net are used as regularized logistic classification models.
+
+## Libraries
+
+```{r ml-libraries, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(tibble)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+
+library(mlr3)
+library(mlr3verse)
+library(mlr3learners)
+library(mlr3pipelines)
+library(mlr3tuning)
+library(paradox)
+```
+
+## Settings
+
+```{r ml-settings}
+set.seed(2026)
+
+# Runtime settings
+inner_folds <- 5
+
+n_evals_elastic_net <- 30
+n_evals_svm <- 30
+n_evals_rf_tuned <- 50
+
+num_trees_rf <- 500
+
+# Output folder
+dir.create("results/ml", recursive = TRUE, showWarnings = FALSE)
+```
+
+## Load Data and Resampling Structure
+
+```{r load-ml-data}
+data_ml <- readRDS("data/data_ml.rds")
+
+resampling_25x4 <- readRDS("resampling/resampling_25x4_mlr3.rds")
+
+data_ml <- data_ml %>%
+  mutate(
+    Score = factor(as.character(Score), levels = c("0", "1"))
+  )
+
+dim_cols <- grep("^Dim_", names(data_ml), value = TRUE)
+
+cat("Number of embedding features:", length(dim_cols))
+```
+
+## Classification Task
+
+```{r create-ml-task}
+task_ml <- TaskClassif$new(
+  id = "vera_embeddings_ml",
+  backend = data_ml %>%
+    select(Score, all_of(dim_cols)),
+  target = "Score",
+  positive = "1"
+)
+
+task_ml
+```
+
+# Helper Functions
+
+## Performance Metrics
+
+```{r classification-metric-function}
+calculate_classification_metrics <- function(results) {
+  
+  observed <- as.numeric(as.character(results$Score))
+  predicted <- as.numeric(as.character(results$predicted_score))
+  
+  tp <- sum(observed == 1 & predicted == 1, na.rm = TRUE)
+  tn <- sum(observed == 0 & predicted == 0, na.rm = TRUE)
+  fp <- sum(observed == 0 & predicted == 1, na.rm = TRUE)
+  fn <- sum(observed == 1 & predicted == 0, na.rm = TRUE)
+  
+  n <- tp + tn + fp + fn
+  
+  accuracy <- (tp + tn) / n
+  
+  sensitivity <- ifelse(
+    (tp + fn) == 0,
+    NA_real_,
+    tp / (tp + fn)
+  )
+  
+  specificity <- ifelse(
+    (tn + fp) == 0,
+    NA_real_,
+    tn / (tn + fp)
+  )
+  
+  precision <- ifelse(
+    (tp + fp) == 0,
+    NA_real_,
+    tp / (tp + fp)
+  )
+  
+  f1 <- ifelse(
+    is.na(precision) | is.na(sensitivity) | (precision + sensitivity) == 0,
+    NA_real_,
+    2 * precision * sensitivity / (precision + sensitivity)
+  )
+  
+  balanced_accuracy <- mean(c(sensitivity, specificity), na.rm = TRUE)
+  
+  observed_correct <- (tp + fn) / n
+  observed_incorrect <- (tn + fp) / n
+  predicted_correct <- (tp + fp) / n
+  predicted_incorrect <- (tn + fn) / n
+  
+  expected_accuracy <- 
+    observed_correct * predicted_correct +
+    observed_incorrect * predicted_incorrect
+  
+  kappa <- ifelse(
+    (1 - expected_accuracy) == 0,
+    NA_real_,
+    (accuracy - expected_accuracy) / (1 - expected_accuracy)
+  )
+  
+  tibble(
+    accuracy = accuracy,
+    sensitivity = sensitivity,
+    specificity = specificity,
+    precision = precision,
+    f1 = f1,
+    balanced_accuracy = balanced_accuracy,
+    kappa = kappa
+  )
+}
+```
+
+## Extract Metrics from mlr3 Resampling Results
+
+```{r extract-mlr3-metrics}
+extract_resample_metrics <- function(resample_result, model_name) {
+  
+  map_dfr(seq_along(resample_result$predictions()), function(i) {
+    
+    prediction_i <- resample_result$predictions()[[i]]
+    
+    tibble(
+      Score = as.numeric(as.character(prediction_i$truth)),
+      predicted_score = as.numeric(as.character(prediction_i$response))
+    ) %>%
+      calculate_classification_metrics() %>%
+      mutate(
+        model = model_name,
+        resample_number = i
+      )
+  })
+}
+```
+
+## Run or Load Resampling Results
+
+```{r run-or-load-function}
+run_or_load_resample <- function(
+    result_file,
+    time_file,
+    learner,
+    task,
+    resampling,
+    seed = 2026,
+    store_models = FALSE
+) {
+  
+  if (file.exists(result_file) && file.exists(time_file)) {
+    
+    resample_result <- readRDS(result_file)
+    computation_time <- readRDS(time_file)
+    
+  } else {
+    
+    set.seed(seed)
+    
+    start_time <- Sys.time()
+    
+    resample_result <- resample(
+      task = task,
+      learner = learner,
+      resampling = resampling,
+      store_models = store_models
+    )
+    
+    end_time <- Sys.time()
+    
+    computation_time <- end_time - start_time
+    
+    saveRDS(resample_result, result_file)
+    saveRDS(computation_time, time_file)
+  }
+  
+  print(computation_time)
+  return(resample_result)
+}
+```
+
+# Models
+
+## Baseline Model
+
+The baseline model is a featureless classifier. It predicts the majority class in the training data.
+
+```{r baseline-model}
+baseline_file <- "results/ml/res_baseline.rds"
+baseline_time_file <- "results/ml/computation_time_baseline.rds"
+
+lrn_baseline <- lrn(
+  "classif.featureless",
+  predict_type = "response"
+)
+
+lrn_baseline$id <- "Baseline"
+
+res_baseline <- run_or_load_resample(
+  result_file = baseline_file,
+  time_file = baseline_time_file,
+  learner = lrn_baseline,
+  task = task_ml,
+  resampling = resampling_25x4
+)
+```
+
+## Ridge Regression
+
+Ridge Regression is implemented as regularized logistic regression with `alpha = 0`. The regularization parameter `lambda` is selected internally by cross-validation within `cv_glmnet`.
+
+```{r ridge-model}
+ridge_file <- "results/ml/res_ridge.rds"
+ridge_time_file <- "results/ml/computation_time_ridge.rds"
+
+pipe_ridge <- 
+  po("imputemean") %>>%
+  po("scale") %>>%
+  lrn(
+    "classif.cv_glmnet",
+    id = "glmnet_ridge",
+    predict_type = "response",
+    alpha = 0,
+    nfolds = 5,
+    type.measure = "class"
+  )
+
+lrn_ridge <- as_learner(pipe_ridge)
+lrn_ridge$id <- "Ridge"
+
+res_ridge <- run_or_load_resample(
+  result_file = ridge_file,
+  time_file = ridge_time_file,
+  learner = lrn_ridge,
+  task = task_ml,
+  resampling = resampling_25x4
+)
+```
+
+## Elastic Net
+
+Elastic Net is implemented as regularized logistic regression. The regularization parameter `lambda` is selected internally by `cv_glmnet`, while the mixing parameter `alpha` is tuned using inner cross-validation.
+
+```{r elastic-net-model}
+elastic_net_file <- "results/ml/res_elastic_net.rds"
+elastic_net_time_file <- "results/ml/computation_time_elastic_net.rds"
+
+pipe_elastic_net <- 
+  po("imputemean") %>>%
+  po("scale") %>>%
+  lrn(
+    "classif.cv_glmnet",
+    id = "glmnet_en",
+    predict_type = "response",
+    nfolds = 5,
+    type.measure = "class"
+  )
+
+lrn_elastic_net_pipe <- as_learner(pipe_elastic_net)
+
+search_space_elastic_net <- ps(
+  glmnet_en.alpha = p_dbl(
+    lower = 0.05,
+    upper = 1.00
+  )
+)
+
+lrn_elastic_net <- AutoTuner$new(
+  learner = lrn_elastic_net_pipe,
+  resampling = rsmp("cv", folds = inner_folds),
+  measure = msr("classif.bacc"),
+  search_space = search_space_elastic_net,
+  terminator = trm("evals", n_evals = n_evals_elastic_net),
+  tuner = tnr("random_search")
+)
+
+lrn_elastic_net$id <- "Elastic_Net"
+
+res_elastic_net <- run_or_load_resample(
+  result_file = elastic_net_file,
+  time_file = elastic_net_time_file,
+  learner = lrn_elastic_net,
+  task = task_ml,
+  resampling = resampling_25x4
+)
+```
+
+## Support Vector Machine
+
+The SVM uses a radial kernel. The hyperparameters `cost` and `gamma` are tuned using inner cross-validation.
+
+```{r svm-model}
+svm_file <- "results/ml/res_svm.rds"
+svm_time_file <- "results/ml/computation_time_svm.rds"
+
+pipe_svm <- 
+  po("imputemean") %>>%
+  po("scale") %>>%
+  lrn(
+    "classif.svm",
+    id = "svm",
+    predict_type = "response",
+    type = "C-classification",
+    kernel = "radial"
+  )
+
+lrn_svm_pipe <- as_learner(pipe_svm)
+
+search_space_svm <- ps(
+  svm.cost = p_dbl(
+    lower = -3,
+    upper = 3,
+    trafo = function(x) 10^x
+  ),
+  svm.gamma = p_dbl(
+    lower = -5,
+    upper = 0,
+    trafo = function(x) 10^x
+  )
+)
+
+lrn_svm <- AutoTuner$new(
+  learner = lrn_svm_pipe,
+  resampling = rsmp("cv", folds = inner_folds),
+  measure = msr("classif.bacc"),
+  search_space = search_space_svm,
+  terminator = trm("evals", n_evals = n_evals_svm),
+  tuner = tnr("random_search")
+)
+
+lrn_svm$id <- "SVM_tuned"
+
+res_svm <- run_or_load_resample(
+  result_file = svm_file,
+  time_file = svm_time_file,
+  learner = lrn_svm,
+  task = task_ml,
+  resampling = resampling_25x4
+)
+```
+
+## Untuned Random Forest
+
+The untuned Random Forest uses fixed hyperparameters and 500 trees.
+
+```{r random-forest-model}
+rf_file <- "results/ml/res_rf_fixed.rds"
+rf_time_file <- "results/ml/computation_time_rf_fixed.rds"
+
+pipe_rf_fixed <- 
+  po("imputemean") %>>%
+  lrn(
+    "classif.ranger",
+    id = "rf_fixed",
+    predict_type = "response",
+    num.trees = num_trees_rf,
+    importance = "permutation"
+  )
+
+lrn_rf_fixed <- as_learner(pipe_rf_fixed)
+lrn_rf_fixed$id <- "RF_fixed"
+
+res_rf_fixed <- run_or_load_resample(
+  result_file = rf_file,
+  time_file = rf_time_file,
+  learner = lrn_rf_fixed,
+  task = task_ml,
+  resampling = resampling_25x4
+)
+```
+
+## Tuned Random Forest
+
+The tuned Random Forest uses inner cross-validation to tune `mtry` and `min.node.size`.
+
+```{r tuned-random-forest-model}
+rf_tuned_file <- "results/ml/res_rf_tuned.rds"
+rf_tuned_time_file <- "results/ml/computation_time_rf_tuned.rds"
+
+pipe_rf_tuned <- 
+  po("imputemean") %>>%
+  lrn(
+    "classif.ranger",
+    id = "rf_tuned",
+    predict_type = "response",
+    num.trees = num_trees_rf,
+    importance = "permutation"
+  )
+
+lrn_rf_tuned_pipe <- as_learner(pipe_rf_tuned)
+
+search_space_rf_tuned <- ps(
+  rf_tuned.mtry = p_int(
+    lower = 1,
+    upper = length(task_ml$feature_names)
+  ),
+  rf_tuned.min.node.size = p_int(
+    lower = 1,
+    upper = 20
+  )
+)
+
+lrn_rf_tuned <- AutoTuner$new(
+  learner = lrn_rf_tuned_pipe,
+  resampling = rsmp("cv", folds = inner_folds),
+  measure = msr("classif.bacc"),
+  search_space = search_space_rf_tuned,
+  terminator = trm("evals", n_evals = n_evals_rf_tuned),
+  tuner = tnr("random_search")
+)
+
+lrn_rf_tuned$id <- "RF_tuned"
+
+res_rf_tuned <- run_or_load_resample(
+  result_file = rf_tuned_file,
+  time_file = rf_tuned_time_file,
+  learner = lrn_rf_tuned,
+  task = task_ml,
+  resampling = resampling_25x4
+)
+```
+
+# Results
+
+## Combine Results
+
+```{r combine-ml-results}
+baseline_metrics <- extract_resample_metrics(
+  resample_result = res_baseline,
+  model_name = "Baseline"
+)
+
+ridge_metrics <- extract_resample_metrics(
+  resample_result = res_ridge,
+  model_name = "Ridge Regression"
+)
+
+elastic_net_metrics <- extract_resample_metrics(
+  resample_result = res_elastic_net,
+  model_name = "Elastic Net"
+)
+
+svm_metrics <- extract_resample_metrics(
+  resample_result = res_svm,
+  model_name = "Tuned SVM"
+)
+
+rf_metrics <- extract_resample_metrics(
+  resample_result = res_rf_fixed,
+  model_name = "Untuned Random Forest"
+)
+
+rf_tuned_metrics <- extract_resample_metrics(
+  resample_result = res_rf_tuned,
+  model_name = "Tuned Random Forest"
+)
+
+ml_metrics_all <- bind_rows(
+  baseline_metrics,
+  ridge_metrics,
+  elastic_net_metrics,
+  svm_metrics,
+  rf_metrics,
+  rf_tuned_metrics
+)
+
+saveRDS(ml_metrics_all, "results/ml/ml_metrics_all.rds")
+```
+
+## Computation Time Summary
+
+```{r computation-time-summary}
+read_computation_time <- function(file) {
+  if (file.exists(file)) {
+    round(as.numeric(readRDS(file), units = "mins"), 2)
+  } else {
+    NA_real_
+  }
+}
+
+computation_time_summary <- tibble(
+  model = c(
+    "Baseline",
+    "Ridge Regression",
+    "Elastic Net",
+    "Tuned SVM",
+    "Untuned Random Forest",
+    "Tuned Random Forest"
+  ),
+  time_file = c(
+    baseline_time_file,
+    ridge_time_file,
+    elastic_net_time_file,
+    svm_time_file,
+    rf_time_file,
+    rf_tuned_time_file
+  )
+) %>%
+  mutate(
+    computation_time_minutes = map_dbl(time_file, read_computation_time)
+  ) %>%
+  select(model, computation_time_minutes)
+
+computation_time_summary %>%
+  knitr::kable(
+    digits = 2,
+    caption = "Computation time of the machine-learning models.",
+    col.names = c("Model", "Computation time in minutes")
+  ) %>%
+  kableExtra::kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("hover")
+  )
+```
+
+## Performance Summary
+
+```{r ml-performance-summary}
+model_order <- c(
+  "Baseline",
+  "Ridge Regression",
+  "Elastic Net",
+  "Tuned SVM",
+  "Untuned Random Forest",
+  "Tuned Random Forest"
+)
+
+metric_order <- c(
+  "Accuracy",
+  "Balanced accuracy",
+  "Cohen's kappa",
+  "F1 score",
+  "Precision",
+  "Sensitivity",
+  "Specificity"
+)
+
+mean_na <- function(x) {
+  if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
+}
+
+sd_na <- function(x) {
+  if (all(is.na(x))) NA_real_ else sd(x, na.rm = TRUE)
+}
+
+min_na <- function(x) {
+  if (all(is.na(x))) NA_real_ else min(x, na.rm = TRUE)
+}
+
+max_na <- function(x) {
+  if (all(is.na(x))) NA_real_ else max(x, na.rm = TRUE)
+}
+
+ml_metrics_summary <- ml_metrics_all %>%
+  select(
+    model,
+    accuracy,
+    sensitivity,
+    specificity,
+    precision,
+    f1,
+    balanced_accuracy,
+    kappa
+  ) %>%
+  pivot_longer(
+    cols = -model,
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    model = factor(model, levels = model_order),
+    Metric = recode(
+      Metric,
+      accuracy = "Accuracy",
+      sensitivity = "Sensitivity",
+      specificity = "Specificity",
+      precision = "Precision",
+      f1 = "F1 score",
+      balanced_accuracy = "Balanced accuracy",
+      kappa = "Cohen's kappa"
+    ),
+    Metric = factor(Metric, levels = metric_order)
+  ) %>%
+  group_by(model, Metric) %>%
+  summarise(
+    M = mean_na(Value),
+    SD = sd_na(Value),
+    Min = min_na(Value),
+    Max = max_na(Value),
+    .groups = "drop"
+  ) %>%
+  arrange(model, Metric)
+
+saveRDS(ml_metrics_summary, "results/ml/ml_metrics_summary.rds")
+
+ml_metrics_summary %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Classification performance of the machine-learning models.",
+    col.names = c("Model", "Metric", "M", "SD", "Min", "Max")
+  ) %>%
+  kableExtra::kable_styling(
+    full_width = TRUE,
+    bootstrap_options = c("hover")
+  )
+```
+
+## Accuracy Plot
+
+```{r ml-accuracy-plot, fig.width=11, fig.height=6}
+ml_metrics_all %>%
+  mutate(
+    model = factor(model, levels = model_order)
+  ) %>%
+  ggplot(aes(x = model, y = accuracy)) +
+  geom_boxplot(
+    width = 0.45,
+    fill = "white",
+    color = "grey30",
+    outlier.shape = NA
+  ) +
+  geom_jitter(
+    width = 0.12,
+    height = 0,
+    alpha = 0.35,
+    size = 2,
+    color = "#5B9BD5"
+  ) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 4,
+    fill = "gold",
+    color = "black"
+  ) +
+  scale_y_continuous(
+    limits = c(0.45, 1.02),
+    breaks = seq(0.45, 1.00, by = 0.05)
+  ) +
+  labs(
+    title = "Accuracy of the Machine Learning Models",
+    subtitle = "Across 100 train-test splits",
+    x = NULL,
+    y = "Accuracy"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 22),
+    plot.subtitle = element_text(size = 15),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.x = element_text(size = 13, angle = 30, hjust = 1),
+    axis.text.y = element_text(size = 14),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.border = element_rect(color = "grey30", fill = NA, linewidth = 0.8)
+  )
+```
+
+## Performance Plot Across Metrics
+
+```{r ml-metrics-plot, fig.width=12, fig.height=8}
+ml_metrics_long <- ml_metrics_all %>%
+  select(
+    model,
+    accuracy,
+    sensitivity,
+    specificity,
+    precision,
+    f1,
+    balanced_accuracy,
+    kappa
+  ) %>%
+  pivot_longer(
+    cols = -model,
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    model = factor(model, levels = model_order),
+    Metric = recode(
+      Metric,
+      accuracy = "Accuracy",
+      sensitivity = "Sensitivity",
+      specificity = "Specificity",
+      precision = "Precision",
+      f1 = "F1 score",
+      balanced_accuracy = "Balanced accuracy",
+      kappa = "Cohen's kappa"
+    ),
+    Metric = factor(Metric, levels = metric_order)
+  )
+
+ggplot(ml_metrics_long, aes(x = model, y = Value)) +
+  geom_boxplot(
+    width = 0.45,
+    fill = "white",
+    color = "grey30",
+    outlier.shape = NA
+  ) +
+  geom_jitter(
+    width = 0.12,
+    height = 0,
+    alpha = 0.25,
+    size = 1.6,
+    color = "#5B9BD5"
+  ) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 3,
+    fill = "gold",
+    color = "black"
+  ) +
+  facet_wrap(~Metric, ncol = 2) +
+  scale_y_continuous(
+    limits = c(0.00, 1.02),
+    breaks = seq(0.00, 1.00, by = 0.10)
+  ) +
+  labs(
+    title = "Classification Performance Across Metrics",
+    subtitle = "Across 100 train-test splits",
+    x = NULL,
+    y = "Metric value"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.title = element_text(face = "bold", size = 22),
+    plot.subtitle = element_text(size = 15),
+    axis.text.x = element_text(size = 10, angle = 30, hjust = 1),
+    axis.text.y = element_text(size = 12),
+    strip.text = element_text(face = "bold", size = 14),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.border = element_rect(color = "grey30", fill = NA, linewidth = 0.6)
+  )
+```
+
+## Mean Accuracy Ranking
+
+```{r mean-accuracy-ranking}
+ml_metrics_all %>%
+  group_by(model) %>%
+  summarise(
+    mean_accuracy = mean(accuracy, na.rm = TRUE),
+    sd_accuracy = sd(accuracy, na.rm = TRUE),
+    mean_balanced_accuracy = mean(balanced_accuracy, na.rm = TRUE),
+    mean_kappa = mean(kappa, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean_accuracy)) %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Model ranking by mean accuracy.",
+    col.names = c(
+      "Model",
+      "Mean accuracy",
+      "SD accuracy",
+      "Mean balanced accuracy",
+      "Mean Cohen's kappa"
+    )
+  ) %>%
+  kableExtra::kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("hover")
+  )
+```

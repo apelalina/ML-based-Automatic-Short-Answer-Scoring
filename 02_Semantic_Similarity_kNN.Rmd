@@ -1,0 +1,1566 @@
+---
+title: "02 Semantic Similarity kNN"
+author: "Alina Apel"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: show
+    number_sections: true
+    theme: default
+---
+
+```{r setup-libraries, message=FALSE, warning=FALSE, results='hide', class.source='fold-hide'}
+library(dplyr)
+library(purrr)
+library(tibble)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(plotly)
+```
+
+
+# Project Overview
+
+## Short-answer Scoring in Educational Assessment
+
+Short-answer scoring is a common challenge in educational assessment. When students respond to open-ended questions, their answers are often difficult to score automatically because there is usually not just one single correct formulation. For example, a correct answer to the question “Why did the student in the text feel stressed?” could be “because of his exam on Monday,” but also “because he had to study math the whole weekend” or “because of a math test.” Even when a scoring system is given predefined correct answer options, small differences in wording, phrasing, or spelling can cause problems. A simple keyword-based approach might miss answers that are correct in meaning but do not contain the exact expected words.
+
+At the same time, human scoring is time-consuming, especially in large-scale educational assessments with many student responses. Therefore, an important question is whether machine-learning methods can support or partly automate this process. Large language models and semantic-vector approaches offer a promising solution. Instead of only checking for specific keywords, they can represent answers according to their meaning. This makes it possible to identify responses that are semantically similar, even if students use different words to express the same correct idea. Mohler and Mihalcea (2009) framed automatic short-answer grading as a text-to-text similarity problem and showed that semantic similarity measures can be useful for predicting the quality of student responses.
+
+## Semantic Similarity kNN
+
+This project tests whether a **semantic similarity-based k-nearest-neighbor classifier** can score short written student answers.
+
+Each student answer was transformed into a semantic embedding vector. For each response in the test set, its embedding was compared with the embeddings of the responses in the training set using cosine similarity. The aim was to find the k most similar training responses, meaning the answers that were closest in semantic space. These nearest neighbors served as reference examples for the prediction. The predicted score of a test response was determined by the scores of its k = 11 nearest neighbors. If a student answer was most similar to responses that had been scored as correct in the training data, it was also classified as correct; if it was most similar to responses scored as incorrect, it was classified as incorrect. The predictions were compared with human ratings to evaluate accuracy, sensitivity, specificity, precision, F1, and Cohen’s kappa of this approach.  
+
+For automatic short-answer scoring, the Institute for Educational Quality Development (https://www.iqb.hu-berlin.de/) strives for an agreement of at least 90% between human and AI-based ratings, meaning an accuracy of >.90. This practical target was discussed internally in a meeting concerning the analysis of the data set which will be described in the following sections.
+
+# Method
+
+## Vera-3 Dataset
+
+This project uses data from a VERA-3 task. [VERA](https://www.iqb.hu-berlin.de/de/bista/implementation-und-ueberpruefung/vera/) is a large-scale educational assessment in Germany, and the task analyzed in this project contained students’ written responses to an open-ended German listening-comprehension question. The data were provided by the Institute for Educational Quality Development (https://www.iqb.hu-berlin.de/).
+
+N = 802 students participated in different VERA-3 surveys containing the respective task. After excluding students who did not answer, N = 634 answers remained. 
+
+```{r}
+data_knn <- readRDS("data\\data_knn.rds")
+```
+
+First, each student response was transformed into a numerical embedding vector using the `text` package (Kjell et al., 2023). These embeddings represented the semantic content of the answers, so that responses with similar meanings should be located close to each other in the vector space. For this, the model `T-Systems-onsite/cross-en-de-roberta-sentence-transformer` was used. This sentence-transformer model is based on XLM-RoBERTa (Conneau et al., 2020) and was fine-tuned for semantic textual similarity in German and English.
+
+Those preprocessing steps can be found in the file `01_Data_Preparation`.
+
+## Task
+
+The students listened to the following text:
+
+> **Der Handydieb**
+
+> (von Franz Hohler nach einem chinesischen Märchen)
+
+> Ein Mann vermisste einmal sein Handy. Er schaute unter dem Bett nach, auf seinem Schreibtisch und auf der Kommode des Badezimmers. Als er es an keinem dieser Orte fand, kam ihm der Verdacht, es könnte gestohlen worden sein. Er wusste auch sofort, wer sein Handy gestohlen haben musste, nämlich der junge Mann im oberen Stock. Er begann, ihn zu beobachten, und er sah ganz klar, dass der junge Mann die Bewegungen eines Handydiebes hatte. Auch seine Blicke waren die eines Handydiebes, und erst seine Kleider – es waren die typischen Kleider eines Handydiebes! Die Frage war jetzt nur noch, wie er ihm diesen Diebstahl beweisen konnte. „Das Beste wäre“, dachte der Mann, „ich warte, bis er fort ist, dringe dann in seine Wohnung ein und durchsuche alles.“ Der Mann wollte sich zu diesem Zwecke Handschuhe anziehen, öffnete seinen Kleiderschrank und fand dort… sein Handy, das in der Tasche seines Sonntagsanzuges steckte. Und seltsam, als er den jungen Mann im Treppenhaus das nächste Mal anschaute, hatte dieser plötzlich nicht mehr die Bewegungen eines Handydiebes. Auch seine Blicke waren überhaupt nicht die eines Handydiebes, und Kleider wie er trug eigentlich heute fast jeder jüngere Mensch. Der jüngere Mensch aber wunderte sich, dass ihn der Mann aus dem unteren Stock so anschaute. „Der blickt mich ja an“, dachte er „als hätte er mich bestohlen.“ Er vermisste nämlich seit gestern sein Handy.
+
+In “The Phone Thief,” a man hastily suspects his young neighbor of stealing his phone, until he finds it in his own closet and realizes that his suspicion had distorted his perception. The students were instructed to answer the following question in their own words: 
+
+**“Does the title ‘Phone Thief’ fit the text that you heard? Justify your answer.”**
+
+N = 634 responses were scored by a human rater as correct (= 1) or incorrect (= 0). Both yes and no could be scored as correct, depending on the explanation. For example, a student could argue that the title does not fit because no phone was actually stolen. However, another student could also argue that the title does fit because the story is about a suspected or supposed phone thief. This means that the scoring depends less on a specific keyword or answer choice and more on the semantic quality of the explanation. There were n = 355 incorrect and n = 279 responses in the final dataset (see `table()` above).
+
+## Comparison With Previous Analysis
+
+The present analysis builds on an earlier semantic kNN analysis of the same VERA-3 *Handydieb* data set. In the previous analysis, the original student responses were embedded without systematic spelling correction. The semantic kNN model was evaluated using 100 random 70/30 train-test splits and a fixed value of `k = 11`.
+
+In the current analysis, several methodological improvements were implemented. First, the student responses were spelling-corrected before generating sentence embeddings. The data frame `dat_clean` was given to an LLM (ChatGPT 5.5) with the following prompt to generate the recoding rules:
+
+```{text}
+You are helping me prepare primary-school student responses for a scientific text-analysis project.
+
+The dataset contains short German student answers to an open VERA-3 task. The answers include many spelling mistakes, typos, missing capitalization, and child-like writing. Your task is not to score the answers and not to improve their content. Your task is only to help me define cautious preprocessing / recoding rules for spelling normalization.
+
+Please inspect the uploaded responses and propose general recoding rules that correct obvious spelling mistakes while preserving the student’s intended meaning.
+```
+
+Second, a fixed repeated cross-validation structure was created and reused across all analyses. Specifically, 25 repetitions of 4-fold cross-validation were used, resulting in 100 train-test splits. 
+
+Third, the number of nearest neighbors was examined systematically across several values of `k`, rather than relying only on a single value. 
+
+Finally, a second human rating done by myself without looking at the ratings provided by the IQB was included as an additional benchmark for model performance.
+
+## Analysis Summary
+
+The present analysis examined whether short written responses from the VERA-3 Handydieb task could be automatically scored using semantic sentence embeddings and a k-nearest-neighbor classifier. The outcome variable was the human-assigned binary score of each response, with 0 indicating an incorrect response and 1 indicating a correct response. Responses coded as non-answers were excluded before the analysis. The final data set contained the student response text, the original human score, a second human rating, and a sentence embedding for each response.
+
+Before generating the final embeddings, the response texts were preprocessed. Because the answers were written by primary-school students, many responses contained spelling mistakes, typos, and inconsistent word forms. These errors were corrected carefully while preserving the intended meaning of the original answer. The goal of this step was not to improve or reinterpret the students’ answers, but only to reduce surface-level noise that could affect the semantic similarity estimates. Ambiguous responses were not semantically changed.
+
+Each cleaned response was then transformed into a high-dimensional sentence embedding. These embeddings represent the semantic content of the answers numerically, so that responses with similar meanings are located closer to each other in the embedding space. Semantic similarity between responses was calculated using cosine similarity.
+
+The classifier was implemented as a semantic k-nearest-neighbor model. For each response in the test set, the model identified the k most semantically similar responses in the corresponding training set. The prediction was based on the human scores of these nearest neighbors. Specifically, the mean score of the neighboring responses was calculated, and responses were classified as correct if this mean was at least 0.50. Otherwise, they were classified as incorrect.
+
+To evaluate the model, a fixed repeated cross-validation structure was used. The data were split using 25 repetitions of 4-fold cross-validation, resulting in 100 train-test splits. The folds were stratified by the outcome variable, so that the proportion of correct and incorrect responses was kept as similar as possible across folds. The same resampling structure was saved and reused across analyses, which made the evaluation more reproducible and allowed later model comparisons to be based on identical train-test splits.
+
+The number of nearest neighbors was treated as a model setting and examined in a sensitivity analysis. Several values of k were tested using the same repeated cross-validation splits. Based on this comparison, k = 15 was selected as the final value for the semantic kNN model. The final model was then evaluated across all 100 train-test splits.
+
+Model performance was assessed using several classification metrics: accuracy, sensitivity, specificity, precision, F1 score, balanced accuracy, and Cohen’s kappa. Accuracy describes the overall proportion of correctly classified responses. Sensitivity indicates how well the model identified correct responses, whereas specificity indicates how well it identified incorrect responses. Precision describes how many responses predicted as correct were actually correct, and the F1 score combines precision and sensitivity. Balanced accuracy was included because the two score categories were not perfectly balanced. Cohen’s kappa was used as an additional agreement measure because it adjusts for agreement expected by chance.
+
+Two reference points were used to interpret model performance. First, the model was compared with the majority-class baseline, which represents the accuracy that would be achieved by always predicting the more frequent score category. Second, the model was compared with the agreement between the original human rating and the second human rating. 
+
+# Functions for kNN
+
+## Cosine Similarity
+
+The kNN classifier needs a way to decide how similar the given answer is to the other answers in the training data. Therefore, **cosine similarity** was used, which compares the angle between two vectors. Higher values mean that two answers are more similar in semantic space.
+
+$$
+\text{cosine similarity}(\mathbf{a}, \mathbf{b}) =
+\frac{\sum_{i=1}^{n} a_i b_i}
+{\sqrt{\sum_{i=1}^{n} a_i^2} \cdot \sqrt{\sum_{i=1}^{n} b_i^2}}
+$$
+
+```{r cosine-similarity-function}
+cosine_similarity <- function(a, b){
+  sum(a * b) / (sqrt(sum(a^2)) * sqrt(sum(b^2)))
+}
+```
+
+For example, this is the resulting similarity of the first two answers in the data:
+
+```{r}
+a <- data_knn[1,]$embedding_vector[[1]]
+b <- data_knn[2,]$embedding_vector[[1]]
+
+data_knn[1,]$Transkription
+data_knn[2,]$Transkription
+
+cosine_similarity(a, b)
+```
+
+## kNN Prediction
+
+For a given test answer, a kNN-model searches for the `k` most similar answers in the training set. These are the answer's nearest neighbors (NN).
+
+```{r}
+get_k_nearest_neighbors <- function(test_row, train_data, k = 5) {
+  
+  test_vector <- test_row$embedding_vector[[1]]
+  
+  similarities <- sapply(
+    train_data$embedding_vector,
+    function(train_vector) cosine_similarity(test_vector, train_vector)
+  )
+  
+  neighbor_idx <- order(similarities, decreasing = TRUE)[1:k]
+  
+  neighbors <- train_data[neighbor_idx, ]
+  neighbors$cosine_similarity <- similarities[neighbor_idx]
+  
+  return(neighbors)
+}
+```
+
+The following example shows the `k = 11` nearest neighbors of the 101st answer using answers 1 to 100 as the training set:
+
+```{r example-nearest-neighbors}
+get_k_nearest_neighbors(
+  test_row = data_knn[101, ],
+  train_data = data_knn[1:100, ],
+  k = 15
+) %>%
+  select(row_id, Transkription, Score, Score_2, cosine_similarity) %>%
+  mutate(cosine_similarity = round(cosine_similarity, 3)) %>%
+  kable(
+    caption = "Example nearest neighbors for one response.",
+    col.names = c("Row ID", "Response", "Score", "Score 2", "Cosine similarity")
+  )
+```
+
+The prediction is then based on the average score of the `k` nearest neighbors. The function uses whatever is in the variable "Score" and ignores "Score_2" or other columns.
+
+- If the mean neighbor score is at least `.50`, the answer is classified as correct (`1`).
+- If the mean neighbor score is below `.50`, the answer is classified as incorrect (`0`).
+
+An odd value for `k` avoids ties in a binary classification problem.
+
+```{r}
+predict_knn <- function(test_row, train_data, k = 5) {
+  
+  neighbors <- get_k_nearest_neighbors(
+    test_row = test_row,
+    train_data = train_data,
+    k = k
+  )
+  
+  neighbor_scores <- as.numeric(as.character(neighbors$Score))
+  
+  neighbor_score_mean <- mean(neighbor_scores, na.rm = TRUE)
+  
+  predicted_score <- ifelse(neighbor_score_mean >= 0.5, 1, 0)
+  
+  return(c(
+    neighbor_score_mean = neighbor_score_mean,
+    predicted_score = predicted_score
+  ))
+}
+
+# The above function must then be applied to multiple rows in the same function call
+predict_knn_multiple_rows <- function(test_data, train_data, k = 5){
+  
+  predictions <- t(sapply(
+    seq_len(nrow(test_data)),
+    function(i) {
+      predict_knn(
+        test_row = test_data[i, ],
+        train_data = train_data,
+        k = k
+      )
+    }
+  ))
+  
+  predictions <- as.data.frame(predictions)
+  
+  results <- test_data
+  results$neighbor_score_mean <- predictions$neighbor_score_mean
+  results$predicted_score <- predictions$predicted_score
+  
+  return(results) # Returns the given data frame, but adds two columns with predicted probability and predicted score.
+}
+```
+
+The following example predicts the score for the 101st answer based on its 11 nearest neighbors using the answers 1 to 100 as the training set:
+
+```{r example-prediction}
+predict_knn_multiple_rows(
+  test_data = data_knn[101, ],
+  train_data = data_knn[1:100, ],
+  k = 15
+) %>%
+  select(row_id, Transkription, Score, Score_2, neighbor_score_mean, predicted_score) %>%
+  mutate(neighbor_score_mean = round(neighbor_score_mean, 3)) %>%
+  kable(
+    caption = "Example kNN prediction.",
+    col.names = c("Row ID", "Response", "Score", "Score 2", "Mean neighbor score", "Prediction")
+  )
+```
+
+# kNN Predictions
+
+For the final kNN evaluation, the same resampling structure is used for all values of `k`. This ensures that differences between the results are only due to the number of nearest neighbors and not due to different train-test splits.
+
+The following values of `k` are compared:
+
+```{r}
+k_values <- c(1, 3, 5, 7, 9, 11, 13, 15, 17, 19)
+```
+
+```{r load-resampling}
+# Load the fixed resampling structure
+resampling_25x4 <- readRDS("resampling/resampling_25x4_mlr3.rds")
+
+# Make sure Score is numeric, because the kNN prediction uses mean(Score)
+data_knn <- data_knn %>%
+  mutate(
+    Score = as.numeric(as.character(Score)),
+    Score_2 = as.numeric(as.character(Score_2))
+  )
+
+# Check number of resampling iterations
+resampling_25x4$iters
+```
+
+## Evaluation Function
+
+The following function calculates the evaluation metrics for one set of predictions.
+
+```{r evaluation-function}
+calculate_classification_metrics <- function(results) {
+  
+  observed <- as.numeric(results$Score)
+  predicted <- as.numeric(results$predicted_score)
+  
+  tp <- sum(observed == 1 & predicted == 1, na.rm = TRUE)
+  tn <- sum(observed == 0 & predicted == 0, na.rm = TRUE)
+  fp <- sum(observed == 0 & predicted == 1, na.rm = TRUE)
+  fn <- sum(observed == 1 & predicted == 0, na.rm = TRUE)
+  
+  n <- tp + tn + fp + fn
+  
+  accuracy <- (tp + tn) / n
+  
+  sensitivity <- ifelse((tp + fn) == 0, NA, tp / (tp + fn))
+  specificity <- ifelse((tn + fp) == 0, NA, tn / (tn + fp))
+  precision   <- ifelse((tp + fp) == 0, NA, tp / (tp + fp))
+  
+  f1 <- ifelse(
+    is.na(precision) | is.na(sensitivity) | (precision + sensitivity) == 0,
+    NA,
+    2 * precision * sensitivity / (precision + sensitivity)
+  )
+  
+  balanced_accuracy <- mean(c(sensitivity, specificity), na.rm = TRUE)
+  
+  # Cohen's kappa
+  observed_correct <- (tp + fn) / n
+  observed_incorrect <- (tn + fp) / n
+  
+  predicted_correct <- (tp + fp) / n
+  predicted_incorrect <- (tn + fn) / n
+  
+  expected_accuracy <- 
+    observed_correct * predicted_correct +
+    observed_incorrect * predicted_incorrect
+  
+  kappa <- ifelse(
+    (1 - expected_accuracy) == 0,
+    NA,
+    (accuracy - expected_accuracy) / (1 - expected_accuracy)
+  )
+  
+  tibble(
+    accuracy = accuracy,
+    sensitivity = sensitivity,
+    specificity = specificity,
+    precision = precision,
+    f1 = f1,
+    balanced_accuracy = balanced_accuracy,
+    kappa = kappa
+  )
+}
+```
+
+Evaluate the second human rating:
+
+```{r}
+second_rater_metrics <- data_knn %>%
+  transmute(
+    Score = as.numeric(as.character(Score)),
+    predicted_score = as.numeric(as.character(Score_2))
+  ) %>%
+  calculate_classification_metrics()
+```
+
+## Run kNN Across All Resamples
+
+The next function applies the kNN model to one resampling split and one value of `k`.
+
+```{r run-one-knn-resample}
+run_knn_one_resample <- function(resample_number, k) {
+  
+  train_rows <- resampling_25x4$train_set(resample_number)
+  test_rows  <- resampling_25x4$test_set(resample_number)
+  
+  train_data <- data_knn[train_rows, ]
+  test_data  <- data_knn[test_rows, ]
+  
+  predictions <- predict_knn_multiple_rows(
+    test_data = test_data,
+    train_data = train_data,
+    k = k
+  )
+  
+  metrics <- calculate_classification_metrics(predictions) %>%
+    mutate(
+      k = k,
+      resample_number = resample_number
+    )
+  
+  predictions <- predictions %>%
+    mutate(
+      k = k,
+      resample_number = resample_number
+    ) %>%
+    select(
+      k,
+      resample_number,
+      row_id,
+      Transkription,
+      Score,
+      predicted_score,
+      neighbor_score_mean
+    )
+  
+  list(
+    metrics = metrics,
+    predictions = predictions
+  )
+}
+```
+
+Now the kNN model is evaluated for all values of `k` and for all 100 train-test splits.
+
+```{r run-knn-all-k, cache=TRUE}
+dir.create("results/knn", recursive = TRUE, showWarnings = FALSE)
+
+k_values <- c(1, 3, 5, 7, 9, 11, 13, 15, 17, 19)
+
+metrics_file <- "results/knn/knn_metrics_all.rds"
+predictions_file <- "results/knn/knn_predictions_all.rds"
+
+# Load existing results if available
+if (file.exists(metrics_file) && file.exists(predictions_file)) {
+  
+  message("Existing kNN result files found. Loading saved results.")
+  
+  knn_metrics_all <- readRDS(metrics_file)
+  knn_predictions_all <- readRDS(predictions_file)
+  
+  existing_k_values <- sort(unique(knn_metrics_all$k))
+  missing_k_values <- setdiff(k_values, existing_k_values)
+  
+} else {
+  
+  message("No existing kNN result files found.")
+  
+  knn_metrics_all <- tibble()
+  knn_predictions_all <- tibble()
+  missing_k_values <- k_values
+}
+
+# Run only missing k values
+if (length(missing_k_values) > 0) {
+  
+  message("Running kNN for missing k values: ", paste(missing_k_values, collapse = ", "))
+  
+  knn_output_new <- map(missing_k_values, function(k_value) {
+    
+    message("Running kNN with k = ", k_value)
+    
+    map(seq_len(resampling_25x4$iters), function(i) {
+      run_knn_one_resample(
+        resample_number = i,
+        k = k_value
+      )
+    })
+  })
+  
+  knn_metrics_new <- map_dfr(
+    knn_output_new,
+    function(k_output) {
+      map_dfr(k_output, "metrics")
+    }
+  )
+  
+  knn_predictions_new <- map_dfr(
+    knn_output_new,
+    function(k_output) {
+      map_dfr(k_output, "predictions")
+    }
+  )
+  
+  knn_metrics_all <- bind_rows(knn_metrics_all, knn_metrics_new) %>%
+    arrange(k, resample_number)
+  
+  knn_predictions_all <- bind_rows(knn_predictions_all, knn_predictions_new) %>%
+    arrange(k, resample_number)
+  
+  saveRDS(knn_metrics_all, metrics_file)
+  saveRDS(knn_predictions_all, predictions_file)
+  
+  message("Updated kNN results saved.")
+  
+} else {
+  
+  message("All requested k values are already available. No new kNN analyses were run.")
+}
+
+sort(unique(knn_metrics_all$k))
+```
+# Second Human Rater Performance
+
+```{r}
+second_rater_metrics %>%
+  pivot_longer(everything(), names_to = "Metric", values_to = "Value") %>%
+  mutate(
+    Metric = recode(
+      Metric,
+      accuracy = "Accuracy",
+      sensitivity = "Sensitivity",
+      specificity = "Specificity",
+      precision = "Precision",
+      f1 = "F1 score",
+      balanced_accuracy = "Balanced accuracy",
+      kappa = "Cohen's kappa"
+    )
+  ) %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Second human rater performance compared with the original human score.",
+    col.names = c("Metric", "Value")
+  ) %>%
+  kableExtra::kable_styling(
+    full_width = FALSE
+  )
+```
+
+
+# Comparison of k values
+
+```{r prepare-k-comparison, message=FALSE, warning=FALSE, class.source='fold-hide'}
+plot_k_values <- c(1, 3, 5, 7, 9, 11, 13, 15, 17, 19)
+
+knn_metrics_plot <- knn_metrics_all %>%
+  mutate(k = as.numeric(k)) %>%
+  filter(k %in% plot_k_values)
+
+make_summary_table <- function(metric, metric_label) {
+  knn_metrics_plot %>%
+    group_by(k) %>%
+    summarise(
+      M = mean(.data[[metric]], na.rm = TRUE),
+      SD = sd(.data[[metric]], na.rm = TRUE),
+      Min = min(.data[[metric]], na.rm = TRUE),
+      Max = max(.data[[metric]], na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    knitr::kable(
+      digits = 3,
+      caption = paste0(metric_label, " across different values of k."),
+      col.names = c("k", "M", "SD", "Min", "Max"),
+      align = c("c", "c", "c", "c", "c")
+    ) %>%
+    kableExtra::kable_styling(full_width = TRUE,
+                              bootstrap_options = c("hover")) %>%
+    kableExtra::row_spec(row = 0,
+                         bold = TRUE)
+}
+
+make_summary_table_by_k <- function(k_value) {
+  knn_metrics_plot %>%
+    filter(k == k_value) %>%
+    select(accuracy,
+           sensitivity,
+           specificity,
+           precision,
+           f1,
+           balanced_accuracy,
+           kappa) %>%
+    pivot_longer(cols = everything(),
+                 names_to = "Metric",
+                 values_to = "Value") %>%
+    mutate(
+      Metric = recode(
+        Metric,
+        accuracy = "Accuracy",
+        sensitivity = "Sensitivity",
+        specificity = "Specificity",
+        precision = "Precision",
+        f1 = "F1 score",
+        balanced_accuracy = "Balanced accuracy",
+        kappa = "Cohen's kappa"
+      )
+    ) %>%
+    group_by(Metric) %>%
+    summarise(
+      M = mean(Value, na.rm = TRUE),
+      SD = sd(Value, na.rm = TRUE),
+      Min = min(Value, na.rm = TRUE),
+      Max = max(Value, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    knitr::kable(
+      digits = 3,
+      caption = paste0("Classification performance for k = ", k_value, "."),
+      col.names = c("Metric", "M", "SD", "Min", "Max"),
+      align = c("l", "c", "c", "c", "c")
+    ) %>%
+    kableExtra::kable_styling(
+      full_width = TRUE,
+      bootstrap_options = c("hover"),
+      font_size = 18
+    ) %>%
+    kableExtra::row_spec(row = 0,
+                         bold = TRUE,
+                         font_size = 20)
+}
+
+make_boxplot <-
+  function(metric,
+           metric_label,
+           y_min = 0.45,
+           y_max = 1.00) {
+    legend_levels <- c("Single Trial", "Mean", "Second Human Rater")
+    
+    mean_data <- knn_metrics_plot %>%
+      group_by(k) %>%
+      summarise(value = mean(.data[[metric]], na.rm = TRUE), .groups = "drop") %>%
+      mutate(point_type = factor("Mean", levels = legend_levels))
+    
+    second_rater_data <- tibble(
+      k = plot_k_values,
+      value = second_rater_metrics[[metric]],
+      point_type = factor("Second Human Rater", levels = legend_levels)
+    )
+    
+    ggplot(knn_metrics_plot, aes(x = k, y = .data[[metric]], group = k)) +
+      geom_boxplot(
+        width = 0.85,
+        fill = "white",
+        color = "grey30",
+        outlier.shape = NA
+      ) +
+      geom_jitter(
+        aes(
+          color = factor("Single Trial", levels = legend_levels),
+          shape = factor("Single Trial", levels = legend_levels),
+          fill = factor("Single Trial", levels = legend_levels)
+        ),
+        width = 0.20,
+        height = 0,
+        alpha = 0.30,
+        size = 1.8
+      ) +
+      geom_point(
+        data = mean_data,
+        aes(
+          x = k,
+          y = value,
+          color = point_type,
+          shape = point_type,
+          fill = point_type
+        ),
+        inherit.aes = FALSE,
+        size = 3.5
+      ) +
+      geom_point(
+        data = second_rater_data,
+        aes(
+          x = k,
+          y = value,
+          color = point_type,
+          shape = point_type,
+          fill = point_type
+        ),
+        inherit.aes = FALSE,
+        size = 1.8
+      ) +
+      scale_shape_manual(
+        name = NULL,
+        breaks = legend_levels,
+        values = c(
+          "Single Trial" = 16,
+          "Mean" = 23,
+          "Second Human Rater" = 16
+        )
+      ) +
+      scale_color_manual(
+        name = NULL,
+        breaks = legend_levels,
+        values = c(
+          "Single Trial" = "#5B9BD5",
+          "Mean" = "black",
+          "Second Human Rater" = "firebrick"
+        )
+      ) +
+      scale_fill_manual(
+        name = NULL,
+        breaks = legend_levels,
+        values = c(
+          "Single Trial" = "#5B9BD5",
+          "Mean" = "gold",
+          "Second Human Rater" = "firebrick"
+        )
+      ) +
+      guides(
+        color = guide_legend(
+          override.aes = list(
+            shape = c(16, 23, 16),
+            color = c("#5B9BD5", "black", "firebrick"),
+            fill = c("#5B9BD5", "gold", "firebrick"),
+            alpha = c(0.30, 1, 1),
+            size = c(1.8, 3.5, 1.8)
+          )
+        ),
+        shape = "none",
+        fill = "none"
+      ) +
+      scale_x_continuous(breaks = plot_k_values) +
+      scale_y_continuous(limits = c(y_min, y_max),
+                         breaks = seq(y_min, y_max, by = 0.05)) +
+      labs(
+        title = paste0(metric_label, " of the Semantic kNN Classifier"),
+        subtitle = "Across 100 train-test splits for different values of k",
+        x = "Number of nearest neighbors (k)",
+        y = metric_label
+      ) +
+      theme_minimal(base_size = 16) +
+      theme(
+        plot.title = element_text(face = "bold", size = 22),
+        plot.subtitle = element_text(size = 15),
+        axis.title = element_text(size = 18, face = "bold"),
+        axis.text = element_text(size = 14),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.border = element_rect(
+          color = "grey30",
+          fill = NA,
+          linewidth = 0.8
+        ),
+        legend.position = c(0.82, 0.13),
+        legend.background = element_rect(fill = "white", color = "grey70"),
+        legend.key = element_blank(),
+        legend.text = element_text(size = 13)
+      )
+  }
+```
+
+## Summary Table by Metric {.tabset}
+
+### Accuracy
+
+```{r summary-table-accuracy, class.source='fold-hide'}
+make_summary_table("accuracy", "Accuracy")
+```
+
+### Sensitivity
+
+```{r summary-table-sensitivity, class.source='fold-hide'}
+make_summary_table("sensitivity", "Sensitivity")
+```
+
+### Specificity
+
+```{r summary-table-specificity, class.source='fold-hide'}
+make_summary_table("specificity", "Specificity")
+```
+
+### Precision
+
+```{r summary-table-precision, class.source='fold-hide'}
+make_summary_table("precision", "Precision")
+```
+
+### F1 score
+
+```{r summary-table-f1, class.source='fold-hide'}
+make_summary_table("f1", "F1 score")
+```
+
+### Balanced accuracy
+
+```{r summary-table-balanced-accuracy, class.source='fold-hide'}
+make_summary_table("balanced_accuracy", "Balanced accuracy")
+```
+
+### Cohen's kappa
+
+```{r summary-table-kappa, class.source='fold-hide'}
+make_summary_table("kappa", "Cohen's kappa")
+```
+
+
+## Summary Table by k {.tabset}
+
+### k = 1
+
+```{r summary-by-k-1, class.source='fold-hide'}
+make_summary_table_by_k(1)
+```
+
+### k = 3
+
+```{r summary-by-k-3, class.source='fold-hide'}
+make_summary_table_by_k(3)
+```
+
+### k = 5
+
+```{r summary-by-k-5, class.source='fold-hide'}
+make_summary_table_by_k(5)
+```
+
+### k = 7
+
+```{r summary-by-k-7, class.source='fold-hide'}
+make_summary_table_by_k(7)
+```
+
+### k = 9
+
+```{r summary-by-k-9, class.source='fold-hide'}
+make_summary_table_by_k(9)
+```
+
+### k = 11
+
+```{r summary-by-k-11, class.source='fold-hide'}
+make_summary_table_by_k(11)
+```
+
+### k = 13
+
+```{r summary-by-k-13, class.source='fold-hide'}
+make_summary_table_by_k(13)
+```
+
+### k = 15
+
+```{r summary-by-k-15, class.source='fold-hide'}
+make_summary_table_by_k(15)
+```
+
+### k = 17
+
+```{r summary-by-k-17, class.source='fold-hide'}
+make_summary_table_by_k(17)
+```
+
+### k = 19
+
+```{r summary-by-k-19, class.source='fold-hide'}
+make_summary_table_by_k(19)
+```
+
+
+## Boxplots by Metric {.tabset}
+
+### Accuracy
+
+```{r boxplot-accuracy, fig.width=9, fig.height=7, class.source='fold-hide'}
+make_boxplot("accuracy", "Accuracy")
+```
+
+### Sensitivity
+
+```{r boxplot-sensitivity, fig.width=9, fig.height=7, class.source='fold-hide'}
+make_boxplot("sensitivity", "Sensitivity")
+```
+
+### Specificity
+
+```{r boxplot-specificity, fig.width=9, fig.height=7, class.source='fold-hide'}
+make_boxplot("specificity", "Specificity")
+```
+
+### Precision
+
+```{r boxplot-precision, fig.width=9, fig.height=7, class.source='fold-hide'}
+make_boxplot("precision", "Precision")
+```
+
+### F1 score
+
+```{r boxplot-f1, fig.width=9, fig.height=7, class.source='fold-hide'}
+make_boxplot("f1", "F1 score")
+```
+
+### Balanced accuracy
+
+```{r boxplot-balanced-accuracy, fig.width=9, fig.height=7, class.source='fold-hide'}
+make_boxplot("balanced_accuracy", "Balanced accuracy")
+```
+
+### Cohen's kappa
+
+```{r boxplot-kappa, fig.width=9, fig.height=7, class.source='fold-hide'}
+make_boxplot("kappa", "Cohen's kappa", y_min = 0, y_max = 1)
+```
+
+
+## Effect of Neighborhood Size
+
+This analysis showed that the semantic kNN classifier performed mostly consistently across different values of k. Mean accuracy ranged only from .862 for k = 1 to .873 for k = 15 and k = 19. Thus, changing the number of nearest neighbors had only a small effect on overall classification accuracy. A similar pattern was found for balanced accuracy and Cohen’s kappa. Balanced accuracy ranged from .866 to .875, and Cohen’s kappa ranged from .723 to .744. This suggests that the semantic kNN approach was not highly dependent on one specific neighborhood size.
+
+However, the results also showed a small trade-off between sensitivity and specificity. Smaller values of k, especially k = 1 and k = 3, produced the highest sensitivity. For example, sensitivity was .905 for k = 1 and .906 for k = 3. This means that models with very small neighborhoods were slightly better at identifying responses scored as correct. As k increased, sensitivity decreased slightly, but specificity improved. Specificity increased from .828 for k = 1 to .865 for k = 15 and .867 for k = 19. This indicates that larger neighborhoods made the model somewhat more conservative and improved its ability to identify incorrect responses. 
+
+Precision also increased with larger values of k, from .807 for k = 1 to .839 for k = 15 and .840 for k = 19. Thus, when the model predicted a response as correct, this prediction became slightly more reliable at higher values of k.
+
+k = 15 was selected as the final value because it provided a good balance between overall performance and classification stability. It achieved the highest mean accuracy among the compared values (M = .873, SD = .024). Cohen’s kappa was also among the highest values (M = .744, SD = .049).
+
+
+# Final kNN Model with k = 15
+
+Based on the comparison of different values of `k`, the semantic kNN classifier with `k = 15` was selected as the final model. This section reports the performance of this final model across the 100 train-test splits.
+
+```{r final-k15-data, message=FALSE, warning=FALSE}
+chosen_k <- 15
+
+knn_metrics_k15 <- knn_metrics_all %>%
+  mutate(k = as.numeric(k)) %>%
+  filter(k == chosen_k)
+
+knn_predictions_k15 <- knn_predictions_all %>%
+  mutate(k = as.numeric(k)) %>%
+  filter(k == chosen_k)
+```
+
+## Performance Summary
+
+```{r final-k15-summary-table, class.source='fold-hide'}
+knn_metrics_k15 %>%
+  select(
+    accuracy,
+    sensitivity,
+    specificity,
+    precision,
+    f1,
+    balanced_accuracy,
+    kappa
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = recode(
+      Metric,
+      accuracy = "Accuracy",
+      sensitivity = "Sensitivity",
+      specificity = "Specificity",
+      precision = "Precision",
+      f1 = "F1 score",
+      balanced_accuracy = "Balanced accuracy",
+      kappa = "Cohen's kappa"
+    )
+  ) %>%
+  group_by(Metric) %>%
+  summarise(
+    M = mean(Value, na.rm = TRUE),
+    SD = sd(Value, na.rm = TRUE),
+    Min = min(Value, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  knitr::kable(
+    digits = 3,
+    caption = "Classification performance of the final semantic kNN model with k = 15.",
+    col.names = c("Metric", "M", "SD", "Min", "Max"),
+    align = c("l", "c", "c", "c", "c")
+  ) %>%
+  kableExtra::kable_styling(
+    full_width = TRUE,
+    bootstrap_options = c("hover"),
+    font_size = 18
+  ) %>%
+  kableExtra::row_spec(
+    row = 0,
+    bold = TRUE,
+    font_size = 20
+  )
+```
+
+## Accuracy Across Train-Test Splits
+
+```{r final-k15-accuracy-plot, fig.width=8, fig.height=7, class.source='fold-hide', warning = FALSE}
+accuracy_plot_data <- knn_metrics_k15 %>%
+  select(resample_number, accuracy)
+
+mean_accuracy_k15 <- mean(accuracy_plot_data$accuracy, na.rm = TRUE)
+
+second_rater_accuracy <- mean(
+  as.numeric(as.character(data_knn$Score)) ==
+    as.numeric(as.character(data_knn$Score_2)),
+  na.rm = TRUE
+)
+
+majority_class_baseline <- max(prop.table(table(data_knn$Score)))
+
+label_x <- 1.48
+
+ggplot(accuracy_plot_data, aes(x = 1, y = accuracy)) +
+  
+  geom_hline(yintercept = 0.50, linetype = "dashed",
+             linewidth = 0.7, color = "grey40") +
+  geom_hline(yintercept = majority_class_baseline, linetype = "dotted",
+             linewidth = 0.9, color = "grey40") +
+  geom_hline(yintercept = 0.90, linetype = "dashed",
+             linewidth = 0.8, color = "grey40") +
+  geom_hline(yintercept = second_rater_accuracy, linetype = "solid",
+             linewidth = 1, color = "firebrick") +
+  
+  geom_boxplot(
+    aes(group = 1),
+    width = 0.25,
+    fill = "white",
+    color = "grey30",
+    outlier.shape = NA
+  ) +
+  
+  geom_jitter(
+    aes(
+      color = "Single Trial",
+      shape = "Single Trial",
+      fill = "Single Trial"
+    ),
+    width = 0.07,
+    height = 0,
+    alpha = 0.35,
+    size = 2
+  ) +
+  
+  geom_point(
+    aes(
+      x = 1,
+      y = mean_accuracy_k15,
+      color = "Mean",
+      shape = "Mean",
+      fill = "Mean"
+    ),
+    inherit.aes = FALSE,
+    size = 4
+  ) +
+  
+  annotate("text", x = label_x, y = second_rater_accuracy + 0.010,
+           label = paste0("Second human rater accuracy (", round(second_rater_accuracy,3), ")"), hjust = 1, vjust = -0.5, size = 4.5,
+           color = "firebrick") +
+  annotate("text", x = label_x, y = 0.906,
+           label = "90% accuracy", hjust = 1, vjust = -0.5, size = 4.5) +
+  annotate("text", x = label_x, y = majority_class_baseline + 0.006,
+           label = "Majority-class baseline", hjust = 1, vjust = -0.5, size = 4.5) +
+  annotate("text", x = label_x, y = 0.506,
+           label = "50% accuracy", hjust = 1, vjust = -0.5, size = 4.5) +
+  
+  scale_color_manual(
+    name = NULL,
+    breaks = c("Single Trial", "Mean"),
+    values = c(
+      "Single Trial" = "#5B9BD5",
+      "Mean" = "black"
+    )
+  ) +
+  scale_shape_manual(
+    name = NULL,
+    breaks = c("Single Trial", "Mean"),
+    values = c(
+      "Single Trial" = 16,
+      "Mean" = 23
+    )
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    breaks = c("Single Trial", "Mean"),
+    values = c(
+      "Single Trial" = "#5B9BD5",
+      "Mean" = "gold"
+    )
+  ) +
+  guides(
+    color = guide_legend(
+      override.aes = list(
+        shape = c(16, 23),
+        fill = c("#5B9BD5", "gold"),
+        alpha = c(0.35, 1),
+        size = c(2, 4)
+      )
+    ),
+    shape = "none",
+    fill = "none"
+  ) +
+  
+  scale_x_continuous(
+    limits = c(0.5, 1.5),
+    breaks = NULL
+  ) +
+  scale_y_continuous(
+    limits = c(0.45, 1.02),
+    breaks = seq(0.45, 1.00, by = 0.05)
+  ) +
+  
+  labs(
+    title = "Accuracy of the Semantic kNN Classifier",
+    subtitle = "Across 100 train-test splits with k = 15",
+    x = NULL,
+    y = "Accuracy"
+  ) +
+  
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 22),
+    plot.subtitle = element_text(size = 15),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.y = element_text(size = 14),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.minor.y = element_line(linewidth = 0.25),
+    panel.border = element_rect(color = "grey30", fill = NA, linewidth = 0.8),
+    legend.position = c(0.05, 0.07),
+    legend.justification = c(0, 0),
+    legend.background = element_rect(fill = "white", color = "grey70"),
+    legend.key = element_blank(),
+    legend.text = element_text(size = 13)
+  )
+```
+
+## Boxplot
+
+```{r final-k15-performance-plot, fig.width=10, fig.height=7, class.source='fold-hide'}
+metric_levels <- c(
+  "Accuracy",
+  "Sensitivity",
+  "Specificity",
+  "Precision",
+  "F1 score",
+  "Balanced accuracy",
+  "Cohen's kappa"
+)
+
+legend_levels <- c("Single Trial", "Mean", "Second Human Rater")
+
+metrics_long_k15 <- knn_metrics_k15 %>%
+  select(
+    accuracy,
+    sensitivity,
+    specificity,
+    precision,
+    f1,
+    balanced_accuracy,
+    kappa
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = recode(
+      Metric,
+      accuracy = "Accuracy",
+      sensitivity = "Sensitivity",
+      specificity = "Specificity",
+      precision = "Precision",
+      f1 = "F1 score",
+      balanced_accuracy = "Balanced accuracy",
+      kappa = "Cohen's kappa"
+    ),
+    Metric = factor(Metric, levels = metric_levels)
+  )
+
+mean_metrics_k15 <- metrics_long_k15 %>%
+  group_by(Metric) %>%
+  summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(point_type = factor("Mean", levels = legend_levels))
+
+second_rater_metrics_long <- second_rater_metrics %>%
+  select(
+    accuracy,
+    sensitivity,
+    specificity,
+    precision,
+    f1,
+    balanced_accuracy,
+    kappa
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = recode(
+      Metric,
+      accuracy = "Accuracy",
+      sensitivity = "Sensitivity",
+      specificity = "Specificity",
+      precision = "Precision",
+      f1 = "F1 score",
+      balanced_accuracy = "Balanced accuracy",
+      kappa = "Cohen's kappa"
+    ),
+    Metric = factor(Metric, levels = metric_levels),
+    point_type = factor("Second Human Rater", levels = legend_levels)
+  )
+
+ggplot(metrics_long_k15, aes(x = Metric, y = Value)) +
+  geom_boxplot(
+    width = 0.55,
+    fill = "white",
+    color = "grey30",
+    outlier.shape = NA
+  ) +
+  geom_jitter(
+    aes(
+      color = factor("Single Trial", levels = legend_levels),
+      shape = factor("Single Trial", levels = legend_levels),
+      fill = factor("Single Trial", levels = legend_levels)
+    ),
+    width = 0.12,
+    height = 0,
+    alpha = 0.30,
+    size = 1.8
+  ) +
+  geom_point(
+    data = mean_metrics_k15,
+    aes(x = Metric, y = Value, color = point_type, shape = point_type, fill = point_type),
+    inherit.aes = FALSE,
+    size = 3.5
+  ) +
+  geom_point(
+    data = second_rater_metrics_long,
+    aes(x = Metric, y = Value, color = point_type, shape = point_type, fill = point_type),
+    inherit.aes = FALSE,
+    size = 2.2
+  ) +
+  scale_color_manual(
+    name = NULL,
+    breaks = legend_levels,
+    values = c(
+      "Single Trial" = "#5B9BD5",
+      "Mean" = "black",
+      "Second Human Rater" = "firebrick"
+    )
+  ) +
+  scale_shape_manual(
+    name = NULL,
+    breaks = legend_levels,
+    values = c(
+      "Single Trial" = 16,
+      "Mean" = 23,
+      "Second Human Rater" = 16
+    )
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    breaks = legend_levels,
+    values = c(
+      "Single Trial" = "#5B9BD5",
+      "Mean" = "gold",
+      "Second Human Rater" = "firebrick"
+    )
+  ) +
+  guides(
+    color = guide_legend(
+      override.aes = list(
+        shape = c(16, 23, 16),
+        color = c("#5B9BD5", "black", "firebrick"),
+        fill = c("#5B9BD5", "gold", "firebrick"),
+        alpha = c(0.30, 1, 1),
+        size = c(1.8, 3.5, 2.2)
+      )
+    ),
+    shape = "none",
+    fill = "none"
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, by = 0.10)
+  ) +
+  labs(
+    title = "Final Semantic kNN Performance",
+    subtitle = "Across 100 train-test splits with k = 15",
+    x = NULL,
+    y = "Metric value"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 22),
+    plot.subtitle = element_text(size = 15),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    axis.text = element_text(size = 13),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.border = element_rect(color = "grey30", fill = NA, linewidth = 0.8),
+    legend.position = c(0.82, 0.14),
+    legend.background = element_rect(fill = "white", color = "grey70"),
+    legend.key = element_blank(),
+    legend.text = element_text(size = 13)
+  )
+```
+
+# Semantic Space Visualization
+
+The sentence embeddings represent each student response as a high-dimensional semantic vector. To visualize this semantic space, the embedding vectors were reduced to two and three dimensions using principal component analysis (PCA).
+
+```{r semantic-space-pca, class.source='fold-hide', warning=FALSE}
+
+# Create embedding matrix
+embedding_matrix <- do.call(rbind, data_knn$embedding_vector)
+
+# Run PCA on embedding dimensions
+pca_embeddings <- prcomp(
+  embedding_matrix,
+  center = TRUE,
+  scale. = TRUE
+)
+
+# Create plotting data frame
+semantic_space <- data_knn %>%
+  mutate(
+    Score = factor(
+      Score,
+      levels = c(0, 1),
+      labels = c("Incorrect", "Correct")
+    )
+  ) %>%
+  select(row_id, Transkription, Score, Score_2) %>%
+  bind_cols(
+    as_tibble(pca_embeddings$x[, 1:2]) %>%
+      rename(
+        PC1 = PC1,
+        PC2 = PC2
+      )
+  )
+
+# Variance explained by the first two components
+variance_explained <- summary(pca_embeddings)$importance[2, 1:2] * 100
+kable(variance_explained)
+```
+
+## Two dimensions
+
+## Interpretation of the semantic space
+
+The first principal component appears to reflect the length and elaboration of the student response. Short answers such as simple “yes” or “no” responses are located more toward the left side of the plot, whereas longer and more elaborated answers tend to be located further to the right. 
+
+The second principal component appears to reflect differences in the substantive argument of the response. Responses higher or lower on this dimension seem to differ in whether they argue that the title *Der Handydieb* fits the story or does not fit the story.
+
+The plot also shows that correct and incorrect responses are not completely separated. Correct responses are more concentrated in some regions of the semantic space, especially toward the right side of the plot, while incorrect responses are more common in other regions, particularly toward the left side. However, there is also substantial overlap between the two score categories. This overlap helps explain why the semantic kNN classifier performed clearly above the baseline, but did not reach human-rater reliability. Many responses have semantically similar neighbors with the same score, but some responses are located in mixed regions where correct and incorrect answers are close together.
+
+```{r figure-semantic-space-score, fig.width=8, fig.height=7, class.source='fold-hide', warning=FALSE}
+ggplot(semantic_space, aes(x = PC1, y = PC2, color = Score)) +
+  
+  geom_point(
+    alpha = 0.65,
+    size = 2.4
+  ) +
+  
+  labs(
+    title = "Semantic Space of Student Responses",
+    subtitle = "PCA projection of sentence embeddings",
+    x = paste0("PC1 (", round(variance_explained[1], 1), "% variance explained)"),
+    y = paste0("PC2 (", round(variance_explained[2], 1), "% variance explained)"),
+    color = "Human score"
+  ) +
+  
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 22),
+    plot.subtitle = element_text(size = 15),
+    axis.title = element_text(size = 17, face = "bold"),
+    axis.text = element_text(size = 13),
+    legend.title = element_text(face = "bold"),
+    panel.border = element_rect(color = "grey30", fill = NA, linewidth = 0.8)
+  )
+```
+
+```{r interactive-semantic-space, fig.width=8, fig.height=7, class.source='fold-hide',warning=FALSE}
+semantic_space_interactive <- semantic_space %>%
+  mutate(
+    hover_text = paste0(
+      "Row ID: ", row_id,
+      "<br>Answer: ", Transkription,
+      "<br>Human score: ", Score,
+      "<br>Second rater: ", Score_2
+    )
+  )
+
+plotly::plot_ly(
+  data = semantic_space_interactive,
+  x = ~PC1,
+  y = ~PC2,
+  color = ~Score,
+  type = "scatter",
+  mode = "markers",
+  text = ~hover_text,
+  hoverinfo = "text",
+  marker = list(
+    size = 8,
+    opacity = 0.70
+  )
+) %>%
+  layout(
+    title = list(
+      text = "Semantic Space of Student Responses<br><sup>PCA projection of sentence embeddings</sup>"
+    ),
+    xaxis = list(
+      title = paste0("PC1 (", round(variance_explained[1], 1), "% variance explained)")
+    ),
+    yaxis = list(
+      title = paste0("PC2 (", round(variance_explained[2], 1), "% variance explained)")
+    ),
+    legend = list(
+      title = list(text = "Human score")
+    )
+  )
+```
+
+
+
+## 3 dimensions
+
+```{r semantic-space-pca-3d, class.source='fold-hide', warning=FALSE}
+
+# Create embedding matrix
+embedding_matrix <- do.call(rbind, data_knn$embedding_vector)
+
+# Run PCA on embedding dimensions
+pca_embeddings <- prcomp(
+  embedding_matrix,
+  center = TRUE,
+  scale. = TRUE
+)
+
+# Variance explained by the first three components
+variance_explained <- summary(pca_embeddings)$importance[2, 1:3] * 100
+variance_explained
+
+# Create semantic-space data frame with first three PCs
+semantic_space_3d <- data_knn %>%
+  mutate(
+    Score = factor(
+      Score,
+      levels = c(0, 1),
+      labels = c("Incorrect", "Correct")
+    )
+  ) %>%
+  select(row_id, Transkription, Score, Score_2) %>%
+  bind_cols(
+    as_tibble(pca_embeddings$x[, 1:3]) %>%
+      rename(
+        PC1 = PC1,
+        PC2 = PC2,
+        PC3 = PC3
+      )
+  )
+```
+
+```{r interactive-semantic-space-3d, fig.width=8, fig.height=7, class.source='fold-hide', warning=FALSE}
+
+semantic_space_3d_interactive <- semantic_space_3d %>%
+  mutate(
+    hover_text = paste0(
+      "Row ID: ", row_id,
+      "<br>Answer: ", Transkription,
+      "<br>Human score: ", Score,
+      "<br>Second rater: ", Score_2
+    )
+  )
+
+plotly::plot_ly(
+  data = semantic_space_3d_interactive,
+  x = ~PC1,
+  y = ~PC2,
+  z = ~PC3,
+  color = ~Score,
+  type = "scatter3d",
+  mode = "markers",
+  text = ~hover_text,
+  hoverinfo = "text",
+  marker = list(
+    size = 4,
+    opacity = 0.75
+  )
+) %>%
+  layout(
+    title = list(
+      text = "3D Semantic Space of Student Responses<br><sup>PCA projection of sentence embeddings</sup>"
+    ),
+    scene = list(
+      xaxis = list(
+        title = paste0("PC1 (", round(variance_explained[1], 1), "%)")
+      ),
+      yaxis = list(
+        title = paste0("PC2 (", round(variance_explained[2], 1), "%)")
+      ),
+      zaxis = list(
+        title = paste0("PC3 (", round(variance_explained[3], 1), "%)")
+      )
+    ),
+    legend = list(
+      title = list(text = "Human score")
+    )
+  )
+```
+
+
+## By kNN Prediction Accuracy
+
+For the final kNN model with `k = 15`, each response was predicted multiple times across the repeated cross-validation procedure. The following plot shows whether responses were usually classified correctly or incorrectly across the resampling procedure.
+
+```{r semantic-space-knn-errors, class.source='fold-hide', warning=FALSE}
+# Aggregate k = 15 predictions across resamples
+prediction_summary_k15 <- knn_predictions_k15 %>%
+  group_by(row_id) %>%
+  summarise(
+    observed_score = first(Score),
+    mean_predicted_score = mean(predicted_score, na.rm = TRUE),
+    proportion_correctly_predicted = mean(predicted_score == Score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    prediction_quality = case_when(
+      proportion_correctly_predicted == 1 ~ "Always correct",
+      proportion_correctly_predicted == 0 ~ "Always incorrect",
+      TRUE ~ "Sometimes incorrect"
+    ),
+    prediction_quality = factor(
+      prediction_quality,
+      levels = c("Always correct", "Sometimes incorrect", "Always incorrect")
+    )
+  )
+
+semantic_space_predictions <- semantic_space %>%
+  left_join(prediction_summary_k15, by = "row_id")
+```
+
+```{r figure-semantic-space-knn-errors, fig.width=8, fig.height=7, class.source='fold-hide', warning=FALSE}
+ggplot(semantic_space_predictions, aes(x = PC1, y = PC2, color = prediction_quality)) +
+  
+  geom_point(
+    alpha = 0.70,
+    size = 2.4
+  ) +
+  
+  labs(
+    title = "Semantic Space and kNN Prediction Errors",
+    subtitle = "PCA projection of sentence embeddings, final model with k = 15",
+    x = paste0("PC1 (", round(variance_explained[1], 1), "% variance explained)"),
+    y = paste0("PC2 (", round(variance_explained[2], 1), "% variance explained)"),
+    color = "Prediction quality"
+  ) +
+  
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 22),
+    plot.subtitle = element_text(size = 15),
+    axis.title = element_text(size = 17, face = "bold"),
+    axis.text = element_text(size = 13),
+    legend.title = element_text(face = "bold"),
+    panel.border = element_rect(color = "grey30", fill = NA, linewidth = 0.8)
+  )
+```
+
+
+# Discussion
+
+## Interpretation of results
+
+The aim of this project was to evaluate whether semantic similarity can be used to automatically score short student responses from the VERA-3 Handydieb task. For this purpose, student answers were transformed into sentence embeddings and classified with a semantic k-nearest-neighbor approach. The model was evaluated across 100 random train-test splits to obtain more stable estimates of performance.
+
+The final semantic kNN classifier with `k = 15` achieved a mean accuracy of `M = .873` across the 100 train-test splits. This means that, on average, approximately 87% of the student responses were classified in agreement with the original human scores. Compared with the first analysis, in which the model reached an average accuracy of `M = .853`, this corresponds to an improvement of about two percentage points by better pre-processing of the student answers. Because balanced accuracy was very close to the overall accuracy, the model’s performance was not mainly caused by the unequal class distribution of `n = 355` incorrect answers and `n = 279` correct answers. The model therefore performed clearly above the majority-class baseline and showed reasonably strong performance for both correct and incorrect responses.
+
+The additional performance metrics showed that sensitivity increased from `M = .824` to `M = .883`, meaning that the current model was better at identifying responses that were actually correct. This is an important improvement in an educational assessment context, because missed correct answers could lead to students being unfairly classified as incorrect. The previous model might have missed correct responses simply because of incorrect spelling of words. According to the CHC-Model of cognitive abilities, those correspond to different abilities: While the task intends to measure listening ability (LS), a narrow cognitive ability under the broad ability of Comprehension-Knowledge (Gc), missing correct responses because of spelling mistakes would make the student scores also reflect Spelling Ability (SG), a narrow cognitive ability (Spelling Ability, or SG) nested under the broad domain of Reading and Writing (Grw).
+
+Specificity decreased slightly from `M = .876` to `M = .865`, suggesting that the current model was slightly less strong at identifying incorrect responses. Overall, however, the current model showed a more balanced pattern between correct and incorrect responses. Precision remained almost unchanged, increasing only from `M = .838` to `M = .839`, whereas the F1 score increased from `M = .830` to `M = .860`.
+
+Cohen’s kappa also improved. In the first analysis, Cohen’s kappa was `M = .700`, whereas the current model reached `M = .744`. This value is lower than the reported accuracy because kappa corrects for agreement that could occur by chance. According to the commonly used interpretation by Landis and Koch (1977), both values fall into the range of substantial agreement.
+
+At the same time, the model still did not reach the level of agreement between the two human raters. The second human rater reached an accuracy of `.959` compared with the original human score. Cohen’s kappa between the two human raters was `.917`, which was also clearly higher than the model’s average kappa of `.744`.
+
+Altogether, the comparison with the previous analysis suggests that the revised semantic kNN approach performed better than the first version. This suggests that spelling normalization, the fixed repeated cross-validation structure, and the final choice of `k = 15` improved the model’s ability to identify correct responses.
+
+However, the model still remained below the internal practical target of `.90` average accuracy and below the second-human-rater benchmark. Therefore, the semantic similarity-based kNN classifier can be interpreted as a stronger and methodologically more controlled version of the first analysis, but not yet as accurate enough to replace human scoring. Instead, it appears promising as a supportive or exploratory scoring approach for short student responses.
+
+
+## Limitations
+
+Several limitations from the first analysis were addressed in the current version. The original analysis used uncorrected student responses and repeated random 70/30 train-test splits, whereas the current analysis used spelling-normalized responses and a fixed 25 × 4 repeated cross-validation structure. This likely reduced surface-level noise in the embeddings and made the evaluation more systematic and reproducible. In addition, the first analysis used a fixed value of k = 11, while the current analysis compared several values of k and selected k = 15 as a stable final choice. Finally, the current analysis added an internal second-rater benchmark, which made it possible to compare model performance with human-human scoring reliability within the same dataset.
+
+A remaining limitation is that the analysis was based on one task from one dataset. It is therefore unclear whether the same performance would generalize to other VERA tasks, other types of short-answer questions, or other student samples. Future analyses should test whether the approach performs similarly across different tasks and scoring rubrics.
+
+Finally, although spelling normalization improved the methodological quality of the analysis, it also introduces a preprocessing step that has to be applied carefully. The goal was to correct only surface-level errors without changing the meaning of the student responses. Nevertheless, preprocessing decisions can influence the resulting embeddings and therefore the model predictions.
+
+Overall, the current analysis can be interpreted as a stronger and methodologically more controlled version of the first analysis. It shows that semantic kNN is a promising supportive or exploratory scoring approach for short student responses, but not yet a full replacement for human raters.
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
