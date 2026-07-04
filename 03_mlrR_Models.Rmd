@@ -566,6 +566,7 @@ ROC AUC was calculated as a measure of class separation. For the semantic kNN mo
 
 ```{r roc-final-models, message=FALSE, warning=FALSE, fig.width=8, fig.height=6}
 library(pROC)
+set.seed(2026)
 
 dir.create("results/roc", recursive = TRUE, showWarnings = FALSE)
 

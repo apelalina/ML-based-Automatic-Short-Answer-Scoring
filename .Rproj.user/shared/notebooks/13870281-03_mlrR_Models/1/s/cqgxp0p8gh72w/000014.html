@@ -23,38 +23,31 @@
 
 </head>
 <body>
-<table class="table table-hover" style="color: black; width: auto !important; margin-left: auto; margin-right: auto;">
-<caption>Computation time of the machine-learning models.</caption>
+<table class="table table-hover" style="font-size: 16px; color: black; width: auto !important; margin-left: auto; margin-right: auto;">
+<caption style="font-size: initial !important;">ROC AUC of the final semantic kNN model and the final tuned SVM model.</caption>
  <thead>
   <tr>
-   <th style="text-align:left;"> Model </th>
-   <th style="text-align:right;"> Computation time in minutes </th>
+   <th style="text-align:left;font-weight: bold;"> Model </th>
+   <th style="text-align:center;font-weight: bold;"> M </th>
+   <th style="text-align:center;font-weight: bold;"> SD </th>
+   <th style="text-align:center;font-weight: bold;"> Min </th>
+   <th style="text-align:center;font-weight: bold;"> Max </th>
   </tr>
  </thead>
 <tbody>
   <tr>
-   <td style="text-align:left;"> Baseline </td>
-   <td style="text-align:right;"> 0.03 </td>
-  </tr>
-  <tr>
-   <td style="text-align:left;"> Ridge Regression </td>
-   <td style="text-align:right;"> 2.36 </td>
-  </tr>
-  <tr>
-   <td style="text-align:left;"> Elastic Net </td>
-   <td style="text-align:right;"> 291.98 </td>
+   <td style="text-align:left;"> Semantic kNN (k = 15) </td>
+   <td style="text-align:center;"> 0.943 </td>
+   <td style="text-align:center;"> 0.014 </td>
+   <td style="text-align:center;"> 0.905 </td>
+   <td style="text-align:center;"> 0.980 </td>
   </tr>
   <tr>
    <td style="text-align:left;"> Tuned SVM </td>
-   <td style="text-align:right;"> 292.14 </td>
-  </tr>
-  <tr>
-   <td style="text-align:left;"> Untuned Random Forest </td>
-   <td style="text-align:right;"> 2.39 </td>
-  </tr>
-  <tr>
-   <td style="text-align:left;"> Tuned Random Forest </td>
-   <td style="text-align:right;"> 1582.28 </td>
+   <td style="text-align:center;"> 0.965 </td>
+   <td style="text-align:center;"> 0.011 </td>
+   <td style="text-align:center;"> 0.937 </td>
+   <td style="text-align:center;"> 0.988 </td>
   </tr>
 </tbody>
 </table> <script type="text/x-mathjax-config">MathJax.Hub.Config({tex2jax: {inlineMath: [["$","$"]]}})</script><script async src="https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
