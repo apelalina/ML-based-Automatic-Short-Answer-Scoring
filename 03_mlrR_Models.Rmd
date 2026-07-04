@@ -31,6 +31,7 @@ library(ggplot2)
 
 library(mlr3)
 library(mlr3verse)
+library(glmnet)
 library(mlr3learners)
 library(mlr3pipelines)
 library(mlr3tuning)
@@ -228,7 +229,7 @@ run_or_load_resample <- function(
 
 ## Baseline Model
 
-The baseline model is a featureless classifier. It predicts the majority class in the training data.
+The baseline model predicts the majority class in the training data.
 
 ```{r baseline-model}
 baseline_file <- "results/ml/res_baseline.rds"
